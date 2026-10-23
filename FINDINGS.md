@@ -1,44 +1,44 @@
-# Deep Architectural Audit & Specification: GoPro Software Ecosystem & Unified CLI (`gopro-cli`)
+# Deep Architectural Audit & Specification: GoPro Software Ecosystem & Unified CLI (`uel-gopro`)
 
-**Target Project:** `gopro-cli`  
-**Location:** `/Users/sid/Documents/proj/gopro-cli`  
+**Target Project:** `uel-gopro` (Unofficial Extended Life GoPro)  
+**Location:** `/Users/sid/Documents/proj/uel-gopro`  
 **Date:** October 2026  
-**Document Status:** Complete Architecture & Research Assessment  
+**Document Status:** Complete Architecture, Ecosystem Audit & Bug Analysis  
 
 ---
 
-## 1. Executive Summary & Problem Space
+## 1. Executive Summary & Philosophical Mission
 
-The action camera ecosystem for GoPro is severely fragmented. While GoPro hardware (HERO9 through HERO13, MAX) is capable of high-bandwidth wired control, BLE orchestration, local Wi-Fi station connectivity, telemetry extraction, and cloud synchronization, the software landscape consists of siloed, incompatible tools:
+**UEL** stands for **Unofficial Extended Life**. GoPro's software ecosystem is steadily degrading, deprecating open desktop tooling, and moving core features behind paywalls and mobile app enclosures:
 
-1. **Official SDKs (`gopro/OpenGoPro`)** provide reference protocol specifications and basic Python/Kotlin demos, but lack a unified, ergonomic command-line utility for power users and automation scripts.
-2. **Legacy Reverse-Engineered Libraries (`KonradIT/gopro-py-api`)** support older cameras (HERO3–HERO8) through deprecated Wi-Fi GET queries, but lag on modern Protobuf-over-BLE and Wired USB-C interfaces.
-3. **Local Ingestion Utilities (`fxstein/GoProX`, `omokage-code/GPTransfer`)** solve file chaptering and MTP transfer failures on macOS, but exist either as monolithic shell scripts or macOS-only GUI applications with zero camera control capabilities.
-4. **Cloud Exporters (`itsankoff/gopro-plus`)** bypass web-portal file limits to scrape the GoPro Plus cloud subscription, but operate completely disconnected from local devices.
-5. **Telemetry Tools (`gopro/gpmf-parser`, `JuanIrache/gopro-telemetry`)** extract binary GPMF sensor streams into GPX/CSV, but exist as detached C/JavaScript libraries.
-6. **GoPro Labs Firmware (`gopro/labs`)** unlocks low-level camera behavior via QR code macros, but requires manual web-form generation.
+1. **Desktop Abandonment:** The official GoPro Quik desktop app has been abandoned or rewritten into an ad-filled subscription gateway for mobile devices, leaving macOS, Linux, and Windows desktop users without official first-class tools.
+2. **Cloud Paywall Lock-in:** Cloud backup, multi-device sync, and full-resolution offloading are pushed behind the GoPro Premium subscription, while the web portal arbitrarily caps manual downloads at 25 items.
+3. **Webcam & Live Stream Neglect:** The official GoPro Webcam utility for macOS/Windows is notoriously unstable, proprietary, and completely unsupported on Linux, with firmware updates regularly breaking webcam endpoints (e.g., HERO13 Black webcam regressions).
+4. **Metadata & Telemetry Siloing:** GPS and IMU telemetry extraction (speedometer, maps, g-force, Gyroflow stabilization) are hidden inside proprietary formats, forcing creators into closed ecosystems.
+5. **Protocol Fragmentation:** Even the official `OpenGoPro` program provides only loose, non-integrated Python/Kotlin demo scripts, leaving users without a cohesive, robust tool.
 
-### Goal of `gopro-cli`
-`gopro-cli` will be an all-in-one, cross-platform terminal interface unifying **all non-GUI GoPro operations**: discovery, multi-transport connection (Wired USB, BLE, Wi-Fi AP, COHN Local LAN), real-time camera state control, high-speed chapter-aware media ingest, lossless stream stitching, telemetry extraction, terminal-based QR macro generation, and cloud backup.
+### The Mission of `uel-gopro` (Unofficial Extended Life)
+`uel-gopro` is an independent, **open-source, local-first CLI toolchain** built to give GoPro hardware an **Unofficial Extended Life** and reclaim full ownership of the camera. It consolidates all reverse-engineered and official interfaces into a single, high-performance terminal utility that never requires cloud subscriptions, proprietary apps, or mobile devices to configure, control, ingest, process, and extract data from GoPro cameras.
 
 ---
 
 ## 2. Hardware Generations & Protocol Evolution
 
-| Generation | Supported Transports | API Architecture | Notable Quirks & Constraints |
+| Generation | Supported Transports | API Architecture | Firmware Gotchas & Limitations |
 | :--- | :--- | :--- | :--- |
 | **HERO3 / HERO3+** | Wi-Fi AP Only | BacPac HTTP GET (`/bacpac/...`) | Password-protected Wi-Fi. No BLE. |
 | **HERO4 / HERO+** | Wi-Fi AP, Legacy BLE | Ambarella HTTP API (`/gp/gpControl/...`) | Early pairing handshake; basic status. |
 | **HERO5 / HERO6 / HERO7** | Wi-Fi AP (5GHz/2.4GHz), BLE | Query string HTTP (`/gp/gpControl/command/...`) | First GPMF telemetry integration. GPS enabled. |
 | **HERO8 Black / MAX** | Wi-Fi AP, BLE | Query string HTTP + BLE command characteristics | Firmware modified Wi-Fi keep-alive rules. |
 | **HERO9 Black** | BLE, Wi-Fi AP, USB-C (FW >= v1.6) | OpenGoPro v1 Spec (Protobuf BLE, HTTP `/gopro/...`) | USB wired mode requires manual MTP/GoPro Connect toggle. |
-| **HERO10 / HERO11 / 11 Mini** | BLE, Wi-Fi AP, USB-C Wired | OpenGoPro v2 Spec (Protobuf BLE, HTTP REST, CoAP) | High-speed CDC-ECM wired interface enabled by default. |
+| **HERO10 / HERO11 / 11 Mini** | BLE, Wi-Fi AP, USB-C Wired | OpenGoPro v2 Spec (Protobuf BLE, HTTP REST, CoAP) | High-speed CDC-ECM wired interface enabled by default. HERO11 (v01.10.00) wired bug after update. |
 | **HERO12 Black** | BLE, Wi-Fi AP, Wi-Fi COHN (STA), USB-C | OpenGoPro v2 Spec + COHN (TLS/HTTPS over LAN) | **GPS hardware removed.** Bluetooth audio added. Native STA Wi-Fi. |
-| **HERO13 Black** | BLE, Wi-Fi 6 AP, Wi-Fi COHN (STA), USB-C | OpenGoPro v2 Spec + Extended Protobuf | Lens Mod auto-detection, magnetic latch power, HB-series lenses. |
+| **HERO13 Black** | BLE, Wi-Fi 6 AP, Wi-Fi COHN (STA), USB-C | OpenGoPro v2 Spec + Extended Protobuf | Lens Mod auto-detection. **Webcam endpoints changed/broken**; mDNS discovery dropouts. |
+| **LIT HERO / MISSION / MAX 2** | BLE, Wi-Fi AP/STA, USB-C | OpenGoPro v2 Spec (FW >= v01.10.00) | Standardized on OpenGoPro v2 Protobuf & REST schema. |
 
 ---
 
-## 3. Deep Analysis of Transport Protocols
+## 3. Deep Analysis of Transport Protocols & Firmware Bugs
 
 ### 3.1. Bluetooth Low Energy (BLE)
 * **Primary Service UUID:** `0000FEA6-0000-1000-8000-00805F9B34FB` (16-bit short form: `0xFEA6`).
@@ -50,39 +50,39 @@ The action camera ecosystem for GoPro is severely fragmented. While GoPro hardwa
   * **Setting Response (`b5f70075-...`):** Notification of setting updates.
   * **Query Request (`b5f70076-...`):** Register for real-time status/setting updates.
   * **Query Response (`b5f70077-...`):** Async notification of status flags (battery %, SD space, recording time).
-* **Wire Format:**
-  * Modern cameras (HERO9+) use **Google Protocol Buffers (Protobuf)** serialized into chunked BLE frames (Header byte containing continuation bit + packet length).
-  * Commands smaller than MTU fit in a single packet; larger packets require standard GoPro packet framing headers (`0x00`-`0x1F` continuation markers).
-* **Role in `gopro-cli`:**
-  * Waking camera from deep sleep (Keep-Alive ping every 3–4 seconds).
-  * Triggering Wi-Fi AP power-on without touching physical buttons.
-  * Rapid wireless shutter trigger and mode switches with minimal power consumption.
+* **Packet Framing Protocol:**
+  * BLE payloads exceeding MTU (typically 20 or 244 bytes depending on OS negotiation) are split with GoPro framing headers:
+    * Single packet: `0b00` prefix + length (or protobuf payload).
+    * Start of multi-packet: `0b01` prefix.
+    * Continuation: `0b10` prefix + sequence index.
 
-### 3.2. Wi-Fi AP Mode (Access Point)
-* **Topology:** Camera hosts a Wi-Fi Access Point (`GP<serial>` or custom SSID). Host computer disconnects from local internet to connect to camera Wi-Fi.
-* **Camera Gateway IP:** Fixed at `10.5.5.9`.
-* **API Port:** `8080` (HTTP).
-* **Keep-Alive Requirement:** Must send periodic HTTP GET to `/gopro/camera/keep_alive` or BLE keep-alive every 30 seconds, or camera Wi-Fi radio shuts down to conserve battery.
-* **Limitations:** Interrupts host internet connectivity; high thermal load on camera.
+### 3.2. Firmware Bugs & Edge Cases (Documented from OpenGoPro FAQ & Field Audits)
+1. **The 32-bit Integer File Size Overflow Bug:**
+   * In `/gopro/media/list`, the file size field `s` for files > 4GB (common on 4K/5.3K captures) overflows 32-bit unsigned/signed bounds on several firmware builds, reporting corrupted file sizes (e.g. negative numbers or truncated modulo $2^{32}$).
+   * **Workaround for `uel-gopro`:** Never trust `s` in `/gopro/media/list` for downloads. Query HTTP `HEAD /videos/DCIM/100GOPRO/<filename>` or parse `Content-Length` header on the GET request stream.
+2. **Wi-Fi AP Keep-Alive Dropouts:**
+   * Camera AP drops connection silently if no keep-alive is received within 30 seconds.
+   * **Workaround for `uel-gopro`:** Background daemon thread pings `/gopro/camera/keep_alive` or emits BLE keep-alive packet at 15-second intervals.
+3. **HERO13 Black Webcam & mDNS Flaws:**
+   * Traditional `/gopro/webcam/start` fails or hangs on certain HERO13 builds.
+   * mDNS discovery packets are sporadically dropped; direct IP probing of USB subnet (`172.2X.1XX.51`) is drastically more reliable than `.local` hostname resolution.
+4. **CDC-ECM Network Routing Conflict on macOS/Linux:**
+   * Plugging GoPro via USB-C can inadvertently re-route default gateway traffic to the camera's internal DHCP gateway (`172.2X.1XX.1`), severing host internet access.
+   * **Workaround for `uel-gopro`:** Set host interface routing metric so camera interface only routes `172.20.0.0/14` subnet traffic, preserving primary WAN gateway.
 
 ### 3.3. Wi-Fi COHN (Camera on the Home Network / Station Mode)
-* **Introduced:** HERO12 Black, HERO13 Black, and recent firmware updates.
-* **Topology:** Camera connects as a client (STA mode) to the user's home Wi-Fi network or mobile hotspot.
-* **Provisioning Mechanism:**
-  1. BLE connection established.
-  2. Host scans local SSIDs or sends credentials (`SSID`, `password`) via Protobuf message over BLE.
-  3. Camera generates a self-signed TLS Certificate and exports its Root CA / public cert over BLE to the host.
-  4. Camera connects to LAN and obtains local IP address via DHCP (e.g., `192.168.1.145`).
-  5. API commands execute over **HTTPS** on port `8080` or `443` using mutual TLS / Basic Auth credentials provided during handshake.
-* **Significance for `gopro-cli`:**
-  * Revolutionary for CLI workflows: host machine **retains internet access** while sending control commands and downloading media across the local network.
+* **Topology:** Camera joins user's existing Wi-Fi LAN / WLAN.
+* **Mechanism:**
+  1. BLE connection provisions SSID and WPA passphrase.
+  2. Camera provisions self-signed TLS certificate and shares fingerprints over BLE.
+  3. Camera pulls DHCP lease on home router (`192.168.x.x`).
+  4. Commands dispatch over HTTPS with TLS validation bypass or imported self-signed cert.
+* **Advantage:** Total freedom from AP tethering; computer stays connected to internet while batch downloading or scripting multi-camera rigs.
 
-### 3.4. Wired USB-C Control (CDC-ECM / RNDIS / NCM)
-* **Driver Standard:** Emulates a USB Ethernet adapter (CDC-ECM on macOS/Linux, RNDIS on Windows).
-* **IP Scheme:** Camera hosts an internal DHCP server, issuing the host an IP on subnet `172.2X.1XX.0/24` (where `X` depends on serial number), with the camera resting at `.51` (e.g., `http://172.20.150.51:8080` or `http://172.24.162.51:8080`).
-* **Throughput:** ~30 to 42 MB/s sustained transfer rate (USB 2.0 / USB 3.0 controller limits depending on model).
-* **Power:** Camera charges continuously while connected.
-* **Control:** Full OpenGoPro HTTP REST API accessible over the USB Ethernet IP without wireless latency or interference.
+### 3.4. Wired USB-C (CDC-ECM / RNDIS / NCM)
+* **Performance:** Direct IP over USB link gives 30–42 MB/s transfer speeds.
+* **Camera Endpoint:** `http://172.2X.1XX.51:8080/`.
+* **Power:** Continuous charging; enables 24/7 continuous timelapse or monitoring setups.
 
 ---
 
@@ -178,12 +178,12 @@ The action camera ecosystem for GoPro is severely fragmented. While GoPro hardwa
 
 ---
 
-## 5. Architectural Blueprint for `gopro-cli`
+## 5. Architectural Blueprint for `uel-gopro`
 
 ### 5.1. Core Command Hierarchy
 
 ```
-gopro-cli
+uel-gopro
 ├── discover                     # Multi-transport scan (USB CDC-ECM, BLE 0xFEA6, LAN/COHN)
 ├── pair                         # Interactive BLE pairing & profile generator
 ├── status                       # Real-time dashboard: battery, SD space, temp, preset, state
@@ -223,11 +223,11 @@ gopro-cli
 
 ## 6. Transport Selection & Auto-Negotiation Strategy
 
-`gopro-cli` will implement a priority-based **Auto-Negotiation Transport Layer**:
+`uel-gopro` will implement a priority-based **Auto-Negotiation Transport Layer**:
 
 ```
                  +---------------------------+
-                 | gopro-cli Command Trigger |
+                 | uel-gopro Command Trigger |
                  +---------------------------+
                                |
                Is Wired USB (CDC-ECM) Present?
@@ -267,7 +267,7 @@ gopro-cli
 ### 7.1. Chapter Stitching Specification
 * **Problem:** Files split at 4,294,967,296 bytes (4GB FAT32 legacy boundary). A 45-minute 4K clip generates `GX010042.MP4`, `GX020042.MP4`, `GX030042.MP4`.
 * **Standard Concat Bug:** Naive `ffmpeg -f concat` strips GPMF telemetry track or causes audio/video desync due to non-zero starting DTS timestamps on subsequent chapters.
-* **`gopro-cli` Stitching Engine:**
+* **`uel-gopro` Stitching Engine:**
   1. Inspect MP4 container tracks (`ffprobe -show_streams`).
   2. Map Track 0 (Video), Track 1 (Audio), Track 2 (Timecode/Spatial Audio), and Track 3 (`gpmd` telemetry).
   3. Generate dynamic FFmpeg concat filter or call `MP4Box -cat` to perform lossless stream copying:
@@ -285,7 +285,7 @@ gopro-cli
 
 ## 8. GoPro Labs QR Generator Specification
 
-`gopro-cli labs qr` will directly render QR codes into terminal standard output using Unicode block elements (`▀`, `▄`, `█`) or truecolor ANSI escapes.
+`uel-gopro labs qr` will directly render QR codes into terminal standard output using Unicode block elements (`▀`, `▄`, `█`) or truecolor ANSI escapes.
 
 **Supported Macro Presets:**
 * **Max Bitrate:** `*BITR=180` (Boosts 4K/5.3K recording bitrate).
@@ -308,7 +308,7 @@ gopro-cli
 
 ### Recommended Phased Architecture
 * **Core Language:** Python 3.11+ using `Typer` / `Rich` for rapid feature completeness, leveraging `bleak` for BLE, `httpx` for HTTP/2 multi-stream downloads, and Protobuf schema bindings.
-* **Packaging:** Standalone binaries compiled via `PyInstaller` or `Nuitka` to distribute zero-dependency executables (`gopro-cli`) via Homebrew and direct GitHub releases.
+* **Packaging:** Standalone binaries compiled via `PyInstaller` or `Nuitka` to distribute zero-dependency executables (`uel-gopro`) via Homebrew and direct GitHub releases.
 
 ---
 
