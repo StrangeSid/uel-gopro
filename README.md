@@ -38,19 +38,45 @@ GoPro's software ecosystem has steadily degraded for desktop and technical users
 
 ## Installation
 
-### Using `uv` (Recommended)
+### 1. One-Line Script (Recommended)
+
+Installs `uel-gopro` directly to `~/.local/bin` using `uv` or an isolated Python virtual environment:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StrangeSid/uel-gopro/main/install.sh | bash
+```
+
+### 2. Homebrew (macOS / Linux)
+
+Install from the local formula or tap:
+
+```bash
+# Direct formula build
+brew install --build-from-source Formula/uel-gopro.rb
+
+# Or via tap
+brew tap StrangeSid/uel-gopro
+brew install uel-gopro
+```
+
+### 3. PyPI (`uv` / `pip`)
+
+```bash
+# Using uv (isolated CLI tool)
+uv tool install uel-gopro
+
+# Using pip
+pip install uel-gopro
+```
+
+### 4. Build from Source or Standalone Binary
 
 ```bash
 git clone https://github.com/StrangeSid/uel-gopro.git
 cd uel-gopro
 uv sync
-```
 
-### Standalone Executable (Zero Dependencies)
-
-Build a self-contained executable that runs without Python:
-
-```bash
+# Build a zero-dependency standalone binary:
 uv run pyinstaller --onefile --name uel-gopro --clean src/uel_gopro/cli/main.py
 ./dist/uel-gopro --help
 ```
