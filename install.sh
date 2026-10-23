@@ -75,6 +75,9 @@ INSTALLED=0
 if command -v uv >/dev/null 2>&1; then
     echo -e "${BLUE}==>${NC} Found ${BOLD}uv${NC}. Installing via uv tool..."
     uv tool install --force uel-gopro
+    if [ -f "$HOME/.local/bin/$BIN_NAME" ] && [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then
+        ln -sf "$HOME/.local/bin/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+    fi
     INSTALLED=1
 fi
 
