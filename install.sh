@@ -74,7 +74,7 @@ INSTALLED=0
 # Method A: Use 'uv' if available (fastest and cleanest tool manager)
 if command -v uv >/dev/null 2>&1; then
     echo -e "${BLUE}==>${NC} Found ${BOLD}uv${NC}. Installing via uv tool..."
-    uv tool install --force "git+https://github.com/${REPO}.git"
+    uv tool install --force uel-gopro
     INSTALLED=1
 fi
 
@@ -99,7 +99,7 @@ if [ "$INSTALLED" -eq 0 ]; then
         mkdir -p "$SHARE_DIR"
         "$PYTHON_CMD" -m venv "$SHARE_DIR/venv"
         "$SHARE_DIR/venv/bin/pip" install --quiet --upgrade pip
-        "$SHARE_DIR/venv/bin/pip" install --quiet "git+https://github.com/${REPO}.git"
+        "$SHARE_DIR/venv/bin/pip" install --quiet --upgrade uel-gopro
         ln -sf "$SHARE_DIR/venv/bin/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
         INSTALLED=1
     fi
