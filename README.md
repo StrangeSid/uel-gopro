@@ -2,7 +2,7 @@
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](COPYING)
 [![Python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![Tests: 63 Passing](https://img.shields.io/badge/tests-63%20passing-brightgreen.svg)]()
+[![Tests: 86 Passing](https://img.shields.io/badge/tests-86%20passing-brightgreen.svg)]()
 
 > **Unofficial Extended Life GoPro Toolchain**
 > A local-first, scriptable CLI toolchain designed to reclaim complete control of GoPro cameras. No mobile apps, no cloud paywalls, and no proprietary lock-in.
@@ -80,16 +80,15 @@ uel-gopro status
 
 # Query real-time status wirelessly over Bluetooth Low Energy
 uel-gopro status --ble
+
+# Output status dashboard as structured JSON
+uel-gopro status --json
 ```
 
 > [!TIP]
 > UEL-GoPro supports two USB connection modes:
 > - **GoPro Connect (CDC-ECM):** Full camera control, shutter, webcam, live streaming, settings, and high-speed downloads (40 MB/s).
 > - **MTP Mode:** File listing and media downloading without changing camera settings. Control commands fallback or prompt to switch to GoPro Connect.
-
-# Output status dashboard as structured JSON
-uel-gopro status --json
-```
 
 ### Recording & Shutter
 
