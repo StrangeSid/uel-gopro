@@ -46,6 +46,7 @@ process_app = typer.Typer(name="process", help="Local media post-processing (cha
 telemetry_app = typer.Typer(name="telemetry", help="GPMF telemetry parsing and export")
 stream_app = typer.Typer(name="stream", help="Live preview streaming and USB webcam")
 labs_app = typer.Typer(name="labs", help="GoPro Labs QR code generator")
+cloud_app = typer.Typer(name="cloud", help="GoPro Plus Cloud subscription sync & backup")
 
 app.add_typer(record_app)
 app.add_typer(config_app)
@@ -55,6 +56,7 @@ app.add_typer(process_app)
 app.add_typer(telemetry_app)
 app.add_typer(stream_app)
 app.add_typer(labs_app)
+app.add_typer(cloud_app)
 
 
 def version_callback(value: bool):
@@ -80,31 +82,55 @@ def main_callback(
 
 @app.command("discover")
 def cmd_discover(
+    scan_ble: bool = typer.Option(False, "--ble", "-b", help="Scan for nearby Bluetooth Low Energy (BLE) GoPro cameras"),
     json_output: bool = typer.Option(False, "--json", help="Output results in JSON format"),
-    timeout: float = typer.Option(1.5, "--timeout", "-t", help="Scan timeout in seconds"),
+    timeout: float = typer.Option(2.0, "--timeout", "-t", help="Scan timeout in seconds"),
 ):
-    """Scan local network adapters and USB CDC-ECM interfaces for GoPro cameras."""
+    """Scan local network adapters (USB CDC-ECM) and BLE for GoPro cameras."""
+    import asyncio
+    from uel_gopro.transport.ble import GoProBleClient
+
     cam = detect_usb_camera(timeout_sec=timeout)
+    ble_devices = []
+    if scan_ble:
+        console.print("[cyan]Scanning for GoPro BLE devices...[/cyan]")
+        ble_devices = asyncio.run(GoProBleClient.scan(timeout=timeout))
 
     if json_output:
+        results = []
         if cam:
-            typer.echo(json.dumps([cam.model_dump()], indent=2))
-        else:
-            typer.echo("[]")
+            results.append(cam.model_dump())
+        for d in ble_devices:
+            results.append({
+                "model_name": getattr(d, "name", "GoPro BLE"),
+                "address": getattr(d, "address", ""),
+                "transport": "ble",
+            })
+        typer.echo(json.dumps(results, indent=2))
         return
 
     table = Table(title="Discovered GoPro Devices", show_header=True, header_style="bold magenta")
-    table.add_column("Interface", style="cyan")
-    table.add_column("IP Address", style="green")
-    table.add_column("Port", style="yellow")
+    table.add_column("Interface / Address", style="cyan")
+    table.add_column("Location / IP", style="green")
+    table.add_column("Port / Channel", style="yellow")
     table.add_column("Transport", style="blue")
 
+    found_any = False
     if cam:
         table.add_row(cam.interface_name or "usb", cam.ip_address, str(cam.port), cam.transport.value.upper())
+        found_any = True
+
+    for d in ble_devices:
+        name = getattr(d, "name", "GoPro")
+        addr = getattr(d, "address", "Unknown")
+        table.add_row(addr, name, "BLE", "BLUETOOTH")
+        found_any = True
+
+    if found_any:
         console.print(table)
     else:
-        console.print("[yellow]No GoPro cameras found over USB CDC-ECM.[/yellow]")
-        console.print("[dim]Hint: Ensure camera is connected via USB-C and set to 'GoPro Connect' mode.[/dim]")
+        console.print("[yellow]No GoPro cameras found.[/yellow]")
+        console.print("[dim]Hint: For USB, connect via USB-C in 'GoPro Connect' mode. For BLE, pass --ble and put camera in pairing mode.[/dim]")
 
 
 @app.command("status")
@@ -596,6 +622,80 @@ def cmd_telemetry_export(
         export_csv(track, out_path)
 
     console.print(f"[bold green]✓ Exported {len(track.gps_points)} telemetry points to {out_path}[/bold green]")
+
+
+# -----------------------------------------------------------------------------
+# Cloud Commands (GoPro Plus)
+# -----------------------------------------------------------------------------
+
+@cloud_app.command("auth")
+def cmd_cloud_auth(
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="GoPro Plus Bearer auth token"),
+    user_id: Optional[str] = typer.Option("", "--user-id", "-u", help="GoPro Plus User ID"),
+):
+    """Authenticate and store GoPro Plus Cloud credentials."""
+    from uel_gopro.cloud.client import save_cloud_auth
+
+    auth_token = token
+    if not auth_token:
+        auth_token = typer.prompt("Enter your GoPro Plus Bearer Auth Token", hide_input=True)
+
+    save_cloud_auth(token=auth_token, user_id=user_id or "")
+    console.print("[bold green]✓ GoPro Plus credentials saved successfully.[/bold green]")
+
+
+@cloud_app.command("list")
+def cmd_cloud_list(
+    page: int = typer.Option(1, "--page", "-p", help="Page number (1-based)"),
+    per_page: int = typer.Option(25, "--per-page", "-n", help="Items per page"),
+    as_json: bool = typer.Option(False, "--json", help="Output as raw JSON"),
+):
+    """List media assets in your GoPro Plus Cloud library."""
+    from uel_gopro.cloud.client import GoProCloudClient
+
+    client = GoProCloudClient()
+    items = client.list_media(page=page, per_page=per_page)
+
+    if as_json:
+        console.print(json.dumps(items, indent=2))
+        return
+
+    table = Table(title=f"GoPro Plus Cloud Library (Page {page})", border_style="cyan")
+    table.add_column("Asset ID", style="dim")
+    table.add_column("Filename", style="bold white")
+    table.add_column("Type", style="cyan")
+    table.add_column("Captured At", style="yellow")
+    table.add_column("Size (MB)", justify="right")
+
+    for it in items:
+        mb = it.get("file_size", 0) / (1024 * 1024)
+        table.add_row(
+            it.get("id", "-"),
+            it.get("filename", "Unknown"),
+            it.get("type", "video").upper(),
+            it.get("captured_at", "-"),
+            f"{mb:.1f}" if mb > 0 else "-",
+        )
+
+    console.print(table)
+
+
+@cloud_app.command("sync")
+def cmd_cloud_sync(
+    dest: Path = typer.Option(Path("./gopro_cloud_backup"), "--dest", "-d", help="Destination folder for backup"),
+    max_pages: int = typer.Option(100, "--max-pages", help="Max pages to scan"),
+):
+    """Mirror all GoPro Plus Cloud media assets to local storage (NAS backup)."""
+    from uel_gopro.cloud.client import GoProCloudClient
+
+    client = GoProCloudClient()
+    console.print(f"[cyan]Syncing GoPro Plus cloud media to {dest}...[/cyan]")
+
+    def on_progress(dl: int, total: int):
+        pass
+
+    downloaded = client.sync_all(dest_dir=dest, max_pages=max_pages, progress_callback=on_progress)
+    console.print(f"[bold green]✓ Cloud sync finished. Processed {len(downloaded)} assets.[/bold green]")
 
 
 def main():

@@ -77,3 +77,51 @@ def test_cli_media_format_safeguards(monkeypatch):
     res_fail = runner.invoke(app, ["media", "format"])
     assert res_fail.exit_code == 1
     assert "Safety Check" in res_fail.output
+
+
+def test_cli_discover_ble(monkeypatch):
+    class MockBleDevice:
+        name = "GoPro Hero 11"
+        address = "AA:BB:CC:DD:EE:FF"
+
+    import asyncio
+    async def mock_scan(**kw):
+        return [MockBleDevice()]
+
+    monkeypatch.setattr("uel_gopro.cli.main.detect_usb_camera", lambda **kw: None)
+    monkeypatch.setattr("uel_gopro.transport.ble.GoProBleClient.scan", mock_scan)
+
+    res = runner.invoke(app, ["discover", "--ble"])
+    assert res.exit_code == 0
+    assert "GoPro Hero 11" in res.stdout
+    assert "AA:BB:CC:DD:EE:FF" in res.stdout
+
+
+def test_cli_cloud_auth_and_list(tmp_path, monkeypatch):
+    # Mock auth save
+    saved = {}
+    monkeypatch.setattr("uel_gopro.cloud.client.save_cloud_auth", lambda token, user_id="": saved.update({"token": token, "user_id": user_id}))
+
+    res_auth = runner.invoke(app, ["cloud", "auth", "--token", "fake_token_123", "--user-id", "user_456"])
+    assert res_auth.exit_code == 0
+    assert saved == {"token": "fake_token_123", "user_id": "user_456"}
+
+    # Mock list
+    class MockCloudClient:
+        def list_media(self, page=1, per_page=25):
+            return [
+                {
+                    "id": "asset_001",
+                    "filename": "GX010042.MP4",
+                    "type": "video",
+                    "captured_at": "2026-10-23T12:00:00Z",
+                    "file_size": 104857600,
+                }
+            ]
+
+    monkeypatch.setattr("uel_gopro.cloud.client.GoProCloudClient", MockCloudClient)
+
+    res_list = runner.invoke(app, ["cloud", "list"])
+    assert res_list.exit_code == 0
+    assert "GX010042.MP4" in res_list.stdout
+    assert "asset_001" in res_list.stdout
