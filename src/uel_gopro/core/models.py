@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 class TransportType(str, Enum):
     USB = "usb"
+    MTP = "mtp"
     COHN = "cohn"
     WIFI_AP = "wifi_ap"
     BLE = "ble"

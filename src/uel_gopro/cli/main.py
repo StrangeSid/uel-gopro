@@ -20,7 +20,7 @@ from rich.progress import (
 from rich.table import Table
 
 from uel_gopro import __version__
-from uel_gopro.core.exceptions import UelError
+from uel_gopro.core.exceptions import UelError, CameraNotFoundError
 from uel_gopro.core.models import TransportType
 from uel_gopro.media.downloader import download_file
 from uel_gopro.media.exif import extract_creation_time, sync_file_time
@@ -84,13 +84,22 @@ def main_callback(
 def cmd_discover(
     scan_ble: bool = typer.Option(False, "--ble", "-b", help="Scan for nearby Bluetooth Low Energy (BLE) GoPro cameras"),
     json_output: bool = typer.Option(False, "--json", help="Output results in JSON format"),
-    timeout: float = typer.Option(2.0, "--timeout", "-t", help="Scan timeout in seconds"),
+    timeout: float = typer.Option(2.5, "--timeout", "-t", help="Scan timeout in seconds"),
 ):
     """Scan local network adapters (USB CDC-ECM) and BLE for GoPro cameras."""
     import asyncio
     from uel_gopro.transport.ble import GoProBleClient
 
     cam = detect_usb_camera(timeout_sec=timeout)
+    mtp_cam = None
+    if not cam:
+        try:
+            from uel_gopro.transport.mtp import MtpClient, is_mtp_available
+            if is_mtp_available():
+                mtp_cam = MtpClient().detect_camera(timeout_sec=timeout)
+        except Exception:
+            pass
+
     ble_devices = []
     if scan_ble:
         console.print("[cyan]Scanning for GoPro BLE devices...[/cyan]")
@@ -100,6 +109,8 @@ def cmd_discover(
         results = []
         if cam:
             results.append(cam.model_dump())
+        if mtp_cam:
+            results.append(mtp_cam.model_dump())
         for d in ble_devices:
             results.append({
                 "model_name": getattr(d, "name", "GoPro BLE"),
@@ -120,6 +131,10 @@ def cmd_discover(
         table.add_row(cam.interface_name or "usb", cam.ip_address, str(cam.port), cam.transport.value.upper())
         found_any = True
 
+    if mtp_cam:
+        table.add_row("USB-MTP", mtp_cam.model_name, "PTP/MTP", "USB (MTP MODE)")
+        found_any = True
+
     for d in ble_devices:
         name = getattr(d, "name", "GoPro")
         addr = getattr(d, "address", "Unknown")
@@ -130,7 +145,7 @@ def cmd_discover(
         console.print(table)
     else:
         console.print("[yellow]No GoPro cameras found.[/yellow]")
-        console.print("[dim]Hint: For USB, connect via USB-C in 'GoPro Connect' mode. For BLE, pass --ble and put camera in pairing mode.[/dim]")
+        console.print("[dim]Hint: For USB, connect via USB-C in 'GoPro Connect' or 'MTP' mode. For BLE, pass --ble.[/dim]")
 
 
 @app.command("status")
@@ -450,8 +465,25 @@ def cmd_media_list(
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List all media stored on camera SD card."""
-    _, client = resolve_camera(target_ip=ip)
-    items = client.get_media_list()
+    items = []
+    try:
+        _, client = resolve_camera(target_ip=ip)
+        items = client.get_media_list()
+    except CameraNotFoundError:
+        # Fallback to USB MTP mode if camera is plugged in MTP mode
+        if not ip:
+            try:
+                from uel_gopro.transport.mtp import MtpClient, is_mtp_available
+                if is_mtp_available():
+                    mtp = MtpClient()
+                    if mtp.detect_camera(timeout_sec=2.5):
+                        console.print("[cyan]Querying media list via USB MTP mode...[/cyan]")
+                        items = mtp.list_media()
+            except Exception as e:
+                logger.debug(f"MTP list check failed: {e}")
+        if not items:
+            raise
+
     if as_json:
         console.print(json.dumps([item.model_dump() for item in items], indent=2))
         return
@@ -494,8 +526,30 @@ def cmd_media_download(
     ip: Optional[str] = typer.Option(None, "--ip", help="Target camera IP"),
 ):
     """Download a file from camera SD card with resume and size verification."""
-    info, client = resolve_camera(target_ip=ip)
-    items = client.get_media_list()
+    try:
+        info, client = resolve_camera(target_ip=ip)
+        items = client.get_media_list()
+    except CameraNotFoundError:
+        # Fallback to USB MTP mode
+        if not ip:
+            try:
+                from uel_gopro.transport.mtp import MtpClient, is_mtp_available
+                if is_mtp_available():
+                    mtp = MtpClient()
+                    if mtp.detect_camera(timeout_sec=2.5):
+                        console.print(f"[cyan]Downloading {filename} via USB MTP mode...[/cyan]")
+                        if not destination.suffix:
+                            destination.mkdir(parents=True, exist_ok=True)
+                            dest_dir = destination
+                        else:
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            dest_dir = destination.parent
+                        out = mtp.download_file(filename=filename, dest_dir=dest_dir)
+                        console.print(f"[bold green]✓ Download complete via MTP:[/bold green] {out}")
+                        return
+            except Exception as e:
+                logger.debug(f"MTP download check failed: {e}")
+        raise
     matching = [it for it in items if it.filename.lower() == filename.lower()]
     if not matching:
         err_console.print(f"[bold red]Error:[/bold red] File '{filename}' not found on camera.")
