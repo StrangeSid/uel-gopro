@@ -188,6 +188,24 @@ uel-gopro stream webcam start --res 1080p
 uel-gopro stream webcam stop
 ```
 
+### GoPro Plus Cloud Sync (NAS Backup)
+
+Bypass the official web interface's 25-file bulk download ceiling and mirror your complete GoPro Plus cloud library:
+
+```bash
+# Store your GoPro Plus authentication token
+uel-gopro cloud auth --token <YOUR_BEARER_TOKEN>
+
+# Browse cloud media assets with pagination
+uel-gopro cloud list --page 1 --per-page 25
+
+# Headless mirror of cloud assets to local storage or NAS
+uel-gopro cloud sync --dest /mnt/nas/GoProCloudBackup --max-pages 100
+```
+
+> [!NOTE]
+> Cloud sync uses atomic `.partial` staging buffers and checks file sizes, skipping assets that are already safely archived.
+
 ---
 
 ## Disclaimer
