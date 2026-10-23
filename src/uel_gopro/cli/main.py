@@ -1,0 +1,459 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Optional, List
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
+from rich.table import Table
+
+from uel_gopro import __version__
+from uel_gopro.core.exceptions import UelError
+from uel_gopro.core.models import TransportType
+from uel_gopro.media.downloader import download_file
+from uel_gopro.media.exif import extract_creation_time, sync_file_time
+from uel_gopro.media.stitcher import detect_chapters, stitch_chapters
+from uel_gopro.transport.manager import resolve_camera
+from uel_gopro.transport.usb import detect_usb_camera
+
+console = Console()
+err_console = Console(stderr=True)
+
+app = typer.Typer(
+    name="uel-gopro",
+    help="UEL-GoPro: Unofficial Extended Life GoPro CLI Toolchain.\nLocal-first, open-source control.",
+    add_completion=False,
+)
+
+# Sub-command groups
+record_app = typer.Typer(name="record", help="Camera shutter & recording commands")
+config_app = typer.Typer(name="config", help="Camera setting mutation commands")
+preset_app = typer.Typer(name="preset", help="Camera preset selection")
+media_app = typer.Typer(name="media", help="On-camera SD card media management")
+process_app = typer.Typer(name="process", help="Local media post-processing (chapter stitch, EXIF)")
+telemetry_app = typer.Typer(name="telemetry", help="GPMF telemetry parsing and export")
+stream_app = typer.Typer(name="stream", help="Live preview streaming and USB webcam")
+labs_app = typer.Typer(name="labs", help="GoPro Labs QR code generator")
+
+app.add_typer(record_app)
+app.add_typer(config_app)
+app.add_typer(preset_app)
+app.add_typer(media_app)
+app.add_typer(process_app)
+app.add_typer(telemetry_app)
+app.add_typer(stream_app)
+app.add_typer(labs_app)
+
+
+def version_callback(value: bool):
+    if value:
+        console.print(f"[bold cyan]uel-gopro[/bold cyan] version [green]{__version__}[/green]")
+        raise typer.Exit()
+
+
+@app.callback()
+def main_callback(
+    version: Optional[bool] = typer.Option(
+        None, "--version", "-v", callback=version_callback, is_eager=True, help="Show version and exit"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable verbose debug logging"),
+):
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+
+
+# -----------------------------------------------------------------------------
+# Discover & Status Commands
+# -----------------------------------------------------------------------------
+
+@app.command("discover")
+def cmd_discover(
+    json_output: bool = typer.Option(False, "--json", help="Output results in JSON format"),
+    timeout: float = typer.Option(1.5, "--timeout", "-t", help="Scan timeout in seconds"),
+):
+    """Scan local network adapters and USB CDC-ECM interfaces for GoPro cameras."""
+    cam = detect_usb_camera(timeout_sec=timeout)
+
+    if json_output:
+        if cam:
+            typer.echo(json.dumps([cam.model_dump()], indent=2))
+        else:
+            typer.echo("[]")
+        return
+
+    table = Table(title="Discovered GoPro Devices", show_header=True, header_style="bold magenta")
+    table.add_column("Interface", style="cyan")
+    table.add_column("IP Address", style="green")
+    table.add_column("Port", style="yellow")
+    table.add_column("Transport", style="blue")
+
+    if cam:
+        table.add_row(cam.interface_name or "usb", cam.ip_address, str(cam.port), cam.transport.value.upper())
+        console.print(table)
+    else:
+        console.print("[yellow]No GoPro cameras found over USB CDC-ECM.[/yellow]")
+        console.print("[dim]Hint: Ensure camera is connected via USB-C and set to 'GoPro Connect' mode.[/dim]")
+
+
+@app.command("status")
+def cmd_status(
+    ip: Optional[str] = typer.Option(None, "--ip", help="Manual camera IP"),
+    json_output: bool = typer.Option(False, "--json", help="Output status in JSON format"),
+):
+    """Display real-time camera state: battery, SD space, mode, and temperature."""
+    try:
+        info, client = resolve_camera(target_ip=ip)
+        status = client.get_status()
+    except UelError as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    if json_output:
+        typer.echo(status.model_dump_json(indent=2))
+        return
+
+    # Render pretty dashboard panel
+    bat_str = f"{status.battery_percent}%" if status.battery_percent is not None else "Unknown"
+    if status.is_charging:
+        bat_str += " ⚡ [green](Charging)[/green]"
+    elif status.battery_percent and status.battery_percent < 20:
+        bat_str = f"[bold red]{bat_str}[/bold red]"
+
+    rec_str = "[bold red]● RECORDING[/bold red]" if status.is_recording else "[dim]Standby[/dim]"
+    sd_mb = f"{status.sd_remaining_mb:,} MB" if status.sd_remaining_mb is not None else "Unknown"
+
+    panel_text = (
+        f"[bold cyan]Camera Link:[/bold cyan] {info.ip_address}:{info.port} ({info.transport.value.upper()})\n"
+        f"[bold cyan]Battery:[/bold cyan]     {bat_str}\n"
+        f"[bold cyan]State:[/bold cyan]       {rec_str}\n"
+        f"[bold cyan]Mode:[/bold cyan]        {status.current_mode}\n"
+        f"[bold cyan]SD Card:[/bold cyan]     {status.sd_status} (Free: {sd_mb})\n"
+        f"[bold cyan]Thermals:[/bold cyan]    {'[bold red]OVERHEAT WARNING[/bold red]' if status.system_hot else '[green]Nominal[/green]'}"
+    )
+    console.print(Panel(panel_text, title="[bold]GoPro Status Dashboard[/bold]", border_style="cyan"))
+
+
+# -----------------------------------------------------------------------------
+# Record Commands
+# -----------------------------------------------------------------------------
+
+@record_app.command("start")
+def cmd_record_start(ip: Optional[str] = typer.Option(None, "--ip")):
+    """Start video recording or timelapse."""
+    _, client = resolve_camera(target_ip=ip)
+    client.shutter_start()
+    console.print("[bold red]● Shutter Started (Recording)[/bold red]")
+
+
+@record_app.command("stop")
+def cmd_record_stop(ip: Optional[str] = typer.Option(None, "--ip")):
+    """Stop video recording."""
+    _, client = resolve_camera(target_ip=ip)
+    client.shutter_stop()
+    console.print("[green]■ Shutter Stopped[/green]")
+
+
+@record_app.command("photo")
+def cmd_record_photo(ip: Optional[str] = typer.Option(None, "--ip")):
+    """Trigger photo capture."""
+    _, client = resolve_camera(target_ip=ip)
+    client.shutter_start()
+    console.print("[green]📸 Photo captured[/green]")
+
+
+# -----------------------------------------------------------------------------
+# Streaming & Webcam Commands
+# -----------------------------------------------------------------------------
+
+@stream_app.command("preview")
+def cmd_stream_preview(
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    player: Optional[str] = typer.Option(None, "--player", "-p", help="Player to launch (mpv or ffplay)"),
+):
+    """Launch low-latency live preview stream."""
+    from uel_gopro.stream.preview import launch_preview_stream
+
+    _, client = resolve_camera(target_ip=ip)
+    console.print("[cyan]Starting camera preview stream...[/cyan]")
+    proc = launch_preview_stream(client, player=player)
+    if proc:
+        proc.wait()
+
+
+@stream_app.command("webcam")
+def cmd_stream_webcam(
+    action: str = typer.Argument("start", help="Action: 'start' or 'stop'"),
+    resolution: str = typer.Option("1080p", "--res", "-r", help="Resolution: 1080p or 720p"),
+    ip: Optional[str] = typer.Option(None, "--ip"),
+):
+    """Toggle USB webcam mode on the GoPro."""
+    from uel_gopro.stream.webcam import start_webcam, stop_webcam
+
+    _, client = resolve_camera(target_ip=ip)
+    if action.lower() == "start":
+        start_webcam(client, resolution=resolution)
+        console.print(f"[green]GoPro USB webcam started at {resolution}.[/green]")
+    elif action.lower() == "stop":
+        stop_webcam(client)
+        console.print("[yellow]GoPro USB webcam stopped.[/yellow]")
+    else:
+        err_console.print(f"[red]Unknown action: {action}. Use 'start' or 'stop'.[/red]")
+        raise typer.Exit(code=1)
+
+
+
+# -----------------------------------------------------------------------------
+# Media Commands
+# -----------------------------------------------------------------------------
+
+@media_app.command("list")
+def cmd_media_list(
+    ip: Optional[str] = typer.Option(None, "--ip", help="Target camera IP"),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """List all media stored on camera SD card."""
+    _, client = resolve_camera(target_ip=ip)
+    items = client.get_media_list()
+    if as_json:
+        console.print(json.dumps([item.model_dump() for item in items], indent=2))
+        return
+
+    table = Table(title="GoPro SD Card Media Listing", border_style="cyan")
+    table.add_column("Directory", style="dim")
+    table.add_column("Filename", style="bold white", no_wrap=True)
+    table.add_column("Type", style="cyan")
+    table.add_column("Size", justify="right")
+    table.add_column("Base ID", style="magenta")
+    table.add_column("Chapter", justify="right")
+    table.add_column("Modified", style="dim")
+
+    for it in items:
+        mb = it.size_bytes / (1024 * 1024)
+        size_str = f"{mb:.1f} MB" if mb < 1024 else f"{mb / 1024:.2f} GB"
+        mod_str = (
+            str(datetime.fromtimestamp(it.mod_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"))
+            if it.mod_time
+            else "Unknown"
+        )
+        chap_str = str(it.chapter_num) if it.is_chapter or it.chapter_num > 1 else "-"
+        table.add_row(
+            it.directory,
+            it.filename,
+            it.media_type.value.upper(),
+            size_str,
+            it.base_id or "-",
+            chap_str,
+            mod_str,
+        )
+
+    console.print(table)
+
+
+@media_app.command("download")
+def cmd_media_download(
+    filename: str = typer.Argument(..., help="Filename on camera to download"),
+    destination: Path = typer.Option(Path("."), "--dest", "-d", help="Destination folder or file path"),
+    ip: Optional[str] = typer.Option(None, "--ip", help="Target camera IP"),
+):
+    """Download a file from camera SD card with resume and size verification."""
+    info, client = resolve_camera(target_ip=ip)
+    items = client.get_media_list()
+    matching = [it for it in items if it.filename.lower() == filename.lower()]
+    if not matching:
+        err_console.print(f"[bold red]Error:[/bold red] File '{filename}' not found on camera.")
+        raise typer.Exit(code=1)
+
+    item = matching[0]
+    dest_path = destination / item.filename if destination.is_dir() else destination
+    url = f"http://{info.ip_address}:{info.port}{item.download_url_path}"
+
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task(f"Downloading {item.filename}", total=item.size_bytes or None)
+
+        def on_progress(downloaded: int, total: int):
+            if total > 0:
+                progress.update(task_id, completed=downloaded, total=total)
+            else:
+                progress.update(task_id, completed=downloaded)
+
+        completed_path = download_file(
+            url,
+            dest_path,
+            progress_callback=on_progress,
+        )
+
+    if item.mod_time:
+        sync_file_time(completed_path, timestamp=item.mod_time)
+
+    console.print(f"[green]✓ Download complete:[/green] {completed_path}")
+
+
+# -----------------------------------------------------------------------------
+# Process Commands (Stitch & EXIF)
+# -----------------------------------------------------------------------------
+
+@process_app.command("stitch")
+def cmd_process_stitch(
+    input_files: List[Path] = typer.Argument(..., help="Chapter video files or directory to stitch"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
+    ffmpeg: str = typer.Option("ffmpeg", "--ffmpeg", help="Path to FFmpeg binary"),
+):
+    """Losslessly stitch GoPro video chapters preserving all streams and telemetry."""
+    expanded_files: List[Path] = []
+    for f in input_files:
+        if f.is_dir():
+            expanded_files.extend(list(f.glob("*.MP4")) + list(f.glob("*.mp4")))
+        elif f.is_file():
+            expanded_files.append(f)
+        else:
+            err_console.print(f"[bold red]Error:[/bold red] Path not found: {f}")
+            raise typer.Exit(code=1)
+
+    if not expanded_files:
+        err_console.print("[bold red]Error:[/bold red] No video files found to stitch.")
+        raise typer.Exit(code=1)
+
+    grouped = detect_chapters(expanded_files)
+    if not grouped:
+        err_console.print("[bold red]Error:[/bold red] No GoPro video chapters detected in provided files.")
+        raise typer.Exit(code=1)
+
+    for base_id, chapters in grouped.items():
+        if len(chapters) <= 1 and output is None:
+            console.print(f"[dim]Skipping base {base_id} (only 1 chapter: {chapters[0].name})[/dim]")
+            continue
+
+        out_path = output if output else chapters[0].parent / f"STITCH_{base_id}.mp4"
+        console.print(f"[cyan]Stitching base ID {base_id} ({len(chapters)} chapters) -> {out_path.name}...[/cyan]")
+        stitched = stitch_chapters(chapters, out_path, ffmpeg_path=ffmpeg)
+        sync_file_time(stitched)
+        console.print(f"[bold green]✓ Stitched successfully:[/bold green] {stitched}")
+
+
+@process_app.command("sync-dates")
+def cmd_process_sync_dates(
+    files: List[Path] = typer.Argument(..., help="Media files to sync filesystem modification time from MP4 metadata"),
+):
+    """Synchronize file modification timestamps with MP4 container creation time."""
+    for f in files:
+        if not f.is_file():
+            err_console.print(f"[dim]Skipping {f} (not a file)[/dim]")
+            continue
+
+        created_dt = extract_creation_time(f)
+        if created_dt:
+            sync_file_time(f, timestamp=created_dt)
+            console.print(f"[green]✓ Synced {f.name}:[/green] {created_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        else:
+            err_console.print(f"[yellow]⚠ Could not extract creation timestamp for {f.name}[/yellow]")
+
+
+# -----------------------------------------------------------------------------
+# GoPro Labs QR Commands
+# -----------------------------------------------------------------------------
+
+@labs_app.command("qr")
+def cmd_labs_qr(
+    code: str = typer.Argument(..., help="Labs code or preset name (e.g. bitrate_max, motion_detect, gyro_logging)"),
+    invert: bool = typer.Option(False, "--invert", "-i", help="Invert QR display colors for light terminals"),
+    save: Optional[Path] = typer.Option(None, "--save", "-s", help="Save QR code to image file (PNG/SVG)"),
+):
+    """Generate and display a GoPro Labs QR code directly in the terminal."""
+    from uel_gopro.labs.qr import render_terminal_qr, save_qr_image, resolve_code, PRESETS
+
+    resolved = resolve_code(code)
+    console.print(f"[bold cyan]GoPro Labs QR Code:[/bold cyan] [yellow]{resolved}[/yellow]")
+    if code in PRESETS:
+        console.print(f"[dim]Preset alias: {code}[/dim]")
+
+    rendered = render_terminal_qr(code, invert=invert)
+    console.print(rendered)
+
+    if save:
+        out_path = save_qr_image(code, save)
+        console.print(f"[green]✓ Saved QR code to {out_path}[/green]")
+
+
+@labs_app.command("presets")
+def cmd_labs_presets():
+    """List all built-in GoPro Labs QR presets."""
+    from uel_gopro.labs.qr import PRESETS
+
+    table = Table(title="GoPro Labs Macro Presets", border_style="cyan")
+    table.add_column("Preset Name", style="bold cyan")
+    table.add_column("GoPro Labs Command", style="yellow")
+    for name, cmd in PRESETS.items():
+        table.add_row(name, cmd)
+    console.print(table)
+
+
+# -----------------------------------------------------------------------------
+# Telemetry Commands
+# -----------------------------------------------------------------------------
+
+@telemetry_app.command("export")
+def cmd_telemetry_export(
+    input_file: Path = typer.Argument(..., help="Path to GoPro MP4 video or raw GPMF file"),
+    format: str = typer.Option("gpx", "--format", "-f", help="Export format: gpx, kml, geojson, csv"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
+):
+    """Extract GPMF telemetry track from GoPro MP4 and export as GPX, KML, GeoJSON, or CSV."""
+    from uel_gopro.telemetry.gpmf import extract_gpmf_from_mp4, parse_gpmf_stream
+    from uel_gopro.telemetry.exporters import export_gpx, export_kml, export_geojson, export_csv
+
+    if not input_file.is_file():
+        err_console.print(f"[bold red]Error:[/bold red] Input file not found: {input_file}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[cyan]Extracting GPMF telemetry from {input_file.name}...[/cyan]")
+    raw_bytes = extract_gpmf_from_mp4(input_file)
+    track = parse_gpmf_stream(raw_bytes)
+
+    if not track.gps_points:
+        console.print("[yellow]Warning: No GPS points found in telemetry stream.[/yellow]")
+
+    fmt = format.lower()
+    default_ext = {"gpx": ".gpx", "kml": ".kml", "geojson": ".geojson", "csv": ".csv"}
+    if fmt not in default_ext:
+        err_console.print(f"[bold red]Error:[/bold red] Unsupported format: {fmt}. Use gpx, kml, geojson, or csv.")
+        raise typer.Exit(code=1)
+
+    out_path = output if output else input_file.with_suffix(default_ext[fmt])
+
+    if fmt == "gpx":
+        export_gpx(track, out_path)
+    elif fmt == "kml":
+        export_kml(track, out_path)
+    elif fmt == "geojson":
+        export_geojson(track, out_path)
+    elif fmt == "csv":
+        export_csv(track, out_path)
+
+    console.print(f"[bold green]✓ Exported {len(track.gps_points)} telemetry points to {out_path}[/bold green]")
+
+
+def main():
+    app()
+
+
+if __name__ == "__main__":
+    main()
