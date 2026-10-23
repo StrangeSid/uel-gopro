@@ -1,8 +1,9 @@
 [project]
 name = "uel-gopro"
 version = "0.1.0"
-description = "Add your description here"
+description = "Unofficial Extended Life GoPro CLI toolchain"
 readme = "README.md"
+license = "GPL-3.0-or-later"
 authors = [
     { name = "StrangeSid", email = "140191922+StrangeSid@users.noreply.github.com" }
 ]
