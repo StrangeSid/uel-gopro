@@ -1,11 +1,7 @@
 # UEL-GoPro
 
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](COPYING)
-[![Python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![Tests: 86 Passing](https://img.shields.io/badge/tests-86%20passing-brightgreen.svg)]()
-
 > **Unofficial Extended Life GoPro Toolchain**
-> A local-first, scriptable CLI toolchain designed to reclaim complete control of GoPro cameras. No mobile apps, no cloud paywalls, and no proprietary lock-in.
+> A local-first, scriptable CLI toolchain.
 
 ---
 
@@ -17,9 +13,6 @@ GoPro's software ecosystem has steadily degraded for desktop and technical users
 - Embedded telemetry (GPS and IMU sensor data) is locked inside binary formats, while webcam utilities frequently break with firmware updates.
 
 **UEL-GoPro** provides a unified command-line toolchain for all GoPro operations: wired USB-C control, chapter-aware media ingest, lossless stream stitching, native GPMF telemetry extraction, optical QR automation, and live streaming.
-
-> [!NOTE]
-> For in-depth technical details on transport discovery, binary protocols, and mitigations, consult the [System Architecture Specification](docs/ARCHITECTURE.md).
 
 ---
 
