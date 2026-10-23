@@ -53,10 +53,13 @@ cd uel-gopro
 uv sync
 ```
 
-### Editable Pip Installation
+### Standalone Executable (Zero Dependencies)
+
+Build a self-contained executable that runs without Python:
 
 ```bash
-pip install -e .
+uv run pyinstaller --onefile --name uel-gopro --clean src/uel_gopro/cli/main.py
+./dist/uel-gopro --help
 ```
 
 ---
@@ -66,11 +69,23 @@ pip install -e .
 ### Discovery & Status
 
 ```bash
-# Auto-detect connected cameras over USB CDC-ECM network
+# Auto-detect connected cameras over USB (GoPro Connect or MTP mode) and BLE
 uel-gopro discover
+
+# Scan for Bluetooth Low Energy (BLE) GoPro cameras
+uel-gopro discover --ble
 
 # Display real-time status dashboard (battery, storage, thermals, recording mode)
 uel-gopro status
+
+# Query real-time status wirelessly over Bluetooth Low Energy
+uel-gopro status --ble
+```
+
+> [!TIP]
+> UEL-GoPro supports two USB connection modes:
+> - **GoPro Connect (CDC-ECM):** Full camera control, shutter, webcam, live streaming, settings, and high-speed downloads (40 MB/s).
+> - **MTP Mode:** File listing and media downloading without changing camera settings. Control commands fallback or prompt to switch to GoPro Connect.
 
 # Output status dashboard as structured JSON
 uel-gopro status --json
