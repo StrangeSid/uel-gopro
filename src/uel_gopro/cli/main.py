@@ -136,9 +136,60 @@ def cmd_discover(
 @app.command("status")
 def cmd_status(
     ip: Optional[str] = typer.Option(None, "--ip", help="Manual camera IP"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Connect and query camera state over BLE"),
     json_output: bool = typer.Option(False, "--json", help="Output status in JSON format"),
 ):
     """Display real-time camera state: battery, SD space, mode, and temperature."""
+    import asyncio
+    from uel_gopro.transport.ble import GoProBleClient
+
+    if use_ble:
+        console.print("[cyan]Connecting to GoPro over Bluetooth Low Energy...[/cyan]")
+
+        async def _query_ble():
+            devices = await GoProBleClient.scan(timeout=3.0)
+            if not devices:
+                raise UelError("No GoPro cameras discovered over BLE. Ensure camera is awake / in pairing mode.")
+            target = devices[0]
+            client = GoProBleClient(address=target.address)
+            await client.connect()
+            bat = await client.get_battery_level()
+            info = await client.get_device_info()
+            await client.disconnect()
+            return target, bat, info
+
+        try:
+            target, bat, dev_info = asyncio.run(_query_ble())
+        except Exception as exc:
+            err_console.print(f"[bold red]BLE Error:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
+        if json_output:
+            typer.echo(json.dumps({
+                "transport": "ble",
+                "device_name": getattr(target, "name", "GoPro"),
+                "address": target.address,
+                "battery_percent": bat,
+                **dev_info,
+            }, indent=2))
+            return
+
+        bat_str = f"{bat}%"
+        if bat < 20:
+            bat_str = f"[bold red]{bat_str}[/bold red]"
+        else:
+            bat_str = f"[bold green]{bat_str}[/bold green]"
+
+        panel_text = (
+            f"[bold cyan]Camera:[/bold cyan]       {getattr(target, 'name', 'GoPro')} ({dev_info.get('manufacturer', 'GoPro')})\n"
+            f"[bold cyan]Address:[/bold cyan]      {target.address} (BLE)\n"
+            f"[bold cyan]Battery:[/bold cyan]      {bat_str}\n"
+            f"[bold cyan]Firmware:[/bold cyan]     {dev_info.get('firmware', 'Unknown')}\n"
+            f"[bold cyan]Serial:[/bold cyan]       {dev_info.get('serial', 'Unknown')}"
+        )
+        console.print(Panel(panel_text, title="[bold]GoPro Real-Time BLE Dashboard[/bold]", border_style="cyan"))
+        return
+
     try:
         info, client = resolve_camera(target_ip=ip)
         status = client.get_status()
@@ -175,25 +226,66 @@ def cmd_status(
 # Record Commands
 # -----------------------------------------------------------------------------
 
+async def _dispatch_ble_shutter(start: bool):
+    from uel_gopro.transport.ble import GoProBleClient
+    devices = await GoProBleClient.scan(timeout=3.0)
+    if not devices:
+        raise UelError("No GoPro cameras discovered over BLE.")
+    client = GoProBleClient(address=devices[0].address)
+    await client.connect()
+    if start:
+        await client.shutter_start()
+    else:
+        await client.shutter_stop()
+    await client.disconnect()
+
+
 @record_app.command("start")
-def cmd_record_start(ip: Optional[str] = typer.Option(None, "--ip")):
+def cmd_record_start(
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Trigger shutter via Bluetooth Low Energy"),
+):
     """Start video recording or timelapse."""
+    import asyncio
+    if use_ble:
+        asyncio.run(_dispatch_ble_shutter(start=True))
+        console.print("[bold red]● Shutter Started over BLE (Recording)[/bold red]")
+        return
+
     _, client = resolve_camera(target_ip=ip)
     client.shutter_start()
     console.print("[bold red]● Shutter Started (Recording)[/bold red]")
 
 
 @record_app.command("stop")
-def cmd_record_stop(ip: Optional[str] = typer.Option(None, "--ip")):
+def cmd_record_stop(
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Trigger shutter via Bluetooth Low Energy"),
+):
     """Stop video recording."""
+    import asyncio
+    if use_ble:
+        asyncio.run(_dispatch_ble_shutter(start=False))
+        console.print("[green]■ Shutter Stopped over BLE[/green]")
+        return
+
     _, client = resolve_camera(target_ip=ip)
     client.shutter_stop()
     console.print("[green]■ Shutter Stopped[/green]")
 
 
 @record_app.command("photo")
-def cmd_record_photo(ip: Optional[str] = typer.Option(None, "--ip")):
+def cmd_record_photo(
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Trigger photo capture via Bluetooth Low Energy"),
+):
     """Trigger photo capture."""
+    import asyncio
+    if use_ble:
+        asyncio.run(_dispatch_ble_shutter(start=True))
+        console.print("[green]📸 Photo captured over BLE[/green]")
+        return
+
     _, client = resolve_camera(target_ip=ip)
     client.shutter_start()
     console.print("[green]📸 Photo captured[/green]")

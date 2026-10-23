@@ -13,8 +13,20 @@ GOPRO_SERVICE_UUID = "0000fea6-0000-1000-8000-00805f9b34fb"
 GOPRO_SERVICE_UUID_SHORT = 0xFEA6
 GOPRO_MANUFACTURER_ID = 0x02F2
 
-COMMAND_REQ = "b5f70072-6ac1-460d-82c6-1132641e3126"
-COMMAND_RSP = "b5f70073-6ac1-460d-82c6-1132641e3126"
+# Standard GoPro BLE Service and Characteristic UUIDs (b5f9...)
+COMMAND_REQ = "b5f90072-aa8d-11e3-9046-0002a5d5c51b"
+COMMAND_RSP = "b5f90073-aa8d-11e3-9046-0002a5d5c51b"
+SETTINGS_REQ = "b5f90074-aa8d-11e3-9046-0002a5d5c51b"
+SETTINGS_RSP = "b5f90075-aa8d-11e3-9046-0002a5d5c51b"
+QUERY_REQ = "b5f90076-aa8d-11e3-9046-0002a5d5c51b"
+QUERY_RSP = "b5f90077-aa8d-11e3-9046-0002a5d5c51b"
+
+# Standard Bluetooth SIG Characteristics
+CHAR_BATTERY_LEVEL = "00002a19-0000-1000-8000-00805f9b34fb"
+CHAR_MODEL_NUMBER = "00002a24-0000-1000-8000-00805f9b34fb"
+CHAR_SERIAL_NUMBER = "00002a25-0000-1000-8000-00805f9b34fb"
+CHAR_FIRMWARE_REV = "00002a26-0000-1000-8000-00805f9b34fb"
+CHAR_MANUFACTURER = "00002a29-0000-1000-8000-00805f9b34fb"
 
 # Command Byte Sequences
 CMD_SHUTTER_START = bytes([0x03, 0x01, 0x01, 0x01])
@@ -121,12 +133,21 @@ class GoProBleClient:
 
     @classmethod
     async def scan(cls, timeout: float = 3.0) -> list[Any]:
-        """Discovers BLE devices advertising 0xFEA6 (GOPRO_SERVICE_UUID)."""
+        """Discovers BLE devices advertising 0xFEA6 (GOPRO_SERVICE_UUID) or GoPro manufacturer ID."""
         devices = await BleakScanner.discover(
             timeout=timeout,
-            service_uuids=[GOPRO_SERVICE_UUID],
+            return_adv=True,
         )
-        return list(devices)
+        gopros = []
+        if isinstance(devices, dict):
+            for d, adv in devices.values():
+                if GOPRO_SERVICE_UUID in adv.service_uuids or GOPRO_MANUFACTURER_ID in adv.manufacturer_data:
+                    if not d.name and adv.local_name:
+                        d.name = adv.local_name
+                    gopros.append(d)
+        else:
+            gopros = list(devices)
+        return gopros
 
     async def connect(self, address: Optional[str] = None) -> None:
         """Connects to GoPro camera by BLE address."""
@@ -178,6 +199,32 @@ class GoProBleClient:
     async def keep_alive(self) -> None:
         """Send keep-alive packet."""
         await self.send_command(CMD_KEEP_ALIVE)
+
+    async def get_battery_level(self) -> int:
+        """Reads the battery level percentage over BLE."""
+        if not self.is_connected or self._client is None:
+            raise TransportError("BLE client is not connected")
+        data = await self._client.read_gatt_char(CHAR_BATTERY_LEVEL)
+        return int(data[0]) if data else 0
+
+    async def get_device_info(self) -> dict[str, str]:
+        """Reads camera model, serial, and firmware revision strings over BLE."""
+        if not self.is_connected or self._client is None:
+            raise TransportError("BLE client is not connected")
+
+        async def _read_str(char_uuid: str) -> str:
+            try:
+                raw = await self._client.read_gatt_char(char_uuid)
+                return raw.decode("utf-8", errors="ignore").strip("\x00")
+            except Exception:
+                return "Unknown"
+
+        return {
+            "manufacturer": await _read_str(CHAR_MANUFACTURER),
+            "model": await _read_str(CHAR_MODEL_NUMBER),
+            "firmware": await _read_str(CHAR_FIRMWARE_REV),
+            "serial": await _read_str(CHAR_SERIAL_NUMBER),
+        }
 
     async def start_notifications(self, callback: Callable[[Any, bytearray], None]) -> None:
         """Register a notification callback on COMMAND_RSP."""

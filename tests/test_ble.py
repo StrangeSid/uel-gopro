@@ -101,7 +101,7 @@ async def test_ble_mock_discovery(monkeypatch):
     assert devices[0].name == "GoPro 1234"
     mock_discover.assert_called_once_with(
         timeout=2.5,
-        service_uuids=[GOPRO_SERVICE_UUID],
+        return_adv=True,
     )
 
 
