@@ -174,6 +174,114 @@ def cmd_record_photo(ip: Optional[str] = typer.Option(None, "--ip")):
 
 
 # -----------------------------------------------------------------------------
+# Preset Commands
+# -----------------------------------------------------------------------------
+
+@preset_app.command("list")
+def cmd_preset_list(
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """List presets configured on camera."""
+    _, client = resolve_camera(target_ip=ip)
+    presets = client.get_presets()
+    if as_json:
+        console.print(json.dumps(presets, indent=2))
+        return
+
+    table = Table(title="GoPro Presets", border_style="cyan")
+    table.add_column("Group / Name", style="bold white")
+    table.add_column("Preset ID", justify="right", style="cyan")
+    table.add_column("Type", style="dim")
+
+    for grp in presets.get("presetGroupArray", []):
+        for p in grp.get("presets", []):
+            table.add_row(
+                p.get("title", "Unknown"),
+                str(p.get("id", "-")),
+                "User" if p.get("userDefined") else "Factory",
+            )
+    console.print(table)
+
+
+@preset_app.command("load")
+def cmd_preset_load(
+    preset_id: int = typer.Argument(..., help="Preset ID to activate"),
+    ip: Optional[str] = typer.Option(None, "--ip"),
+):
+    """Load and activate a specific preset by ID."""
+    _, client = resolve_camera(target_ip=ip)
+    client.load_preset(preset_id)
+    console.print(f"[green]✓ Loaded preset ID {preset_id}[/green]")
+
+
+# -----------------------------------------------------------------------------
+# Config Commands
+# -----------------------------------------------------------------------------
+
+SETTING_ALIASES = {
+    "resolution": 2,
+    "res": 2,
+    "fps": 3,
+    "framerate": 3,
+    "fov": 4,
+    "lens": 4,
+    "bitrate": 102,
+}
+
+@config_app.command("set")
+def cmd_config_set(
+    setting: str = typer.Argument(..., help="Setting name (e.g. resolution, fps, fov, bitrate) or numeric ID"),
+    value: int = typer.Argument(..., help="Value integer code"),
+    ip: Optional[str] = typer.Option(None, "--ip"),
+):
+    """Set a camera setting value."""
+    _, client = resolve_camera(target_ip=ip)
+    setting_id = SETTING_ALIASES.get(setting.lower(), None)
+    if setting_id is None:
+        try:
+            setting_id = int(setting)
+        except ValueError:
+            err_console.print(f"[bold red]Unknown setting:[/bold red] '{setting}'. Valid aliases: {list(SETTING_ALIASES.keys())}")
+            raise typer.Exit(code=1)
+
+    client.set_setting(setting_id, value)
+    console.print(f"[green]✓ Set setting {setting} ({setting_id}) -> {value}[/green]")
+
+
+@config_app.command("get")
+def cmd_config_get(
+    setting: Optional[str] = typer.Argument(None, help="Optional setting name or numeric ID"),
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Get camera settings."""
+    _, client = resolve_camera(target_ip=ip)
+    raw = client.get_raw_state()
+    settings_dict = raw.get("settings", {})
+
+    if setting:
+        setting_id = str(SETTING_ALIASES.get(setting.lower(), setting))
+        val = settings_dict.get(setting_id)
+        if val is None:
+            err_console.print(f"[yellow]Setting {setting} (ID {setting_id}) not found or not active.[/yellow]")
+            return
+        console.print(f"[cyan]{setting}[/cyan] = [bold white]{val}[/bold white]")
+        return
+
+    if as_json:
+        console.print(json.dumps(settings_dict, indent=2))
+        return
+
+    table = Table(title="GoPro Active Settings", border_style="cyan")
+    table.add_column("Setting ID", style="cyan")
+    table.add_column("Value", style="bold white")
+    for k, v in settings_dict.items():
+        table.add_row(str(k), str(v))
+    console.print(table)
+
+
+# -----------------------------------------------------------------------------
 # Streaming & Webcam Commands
 # -----------------------------------------------------------------------------
 
@@ -305,6 +413,45 @@ def cmd_media_download(
         sync_file_time(completed_path, timestamp=item.mod_time)
 
     console.print(f"[green]✓ Download complete:[/green] {completed_path}")
+
+
+@media_app.command("delete")
+def cmd_media_delete(
+    filename: str = typer.Argument(..., help="Filename on camera to delete"),
+    directory: str = typer.Option("100GOPRO", "--dir", help="Directory name on SD card"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force deletion without interactive confirmation"),
+    ip: Optional[str] = typer.Option(None, "--ip", help="Target camera IP"),
+):
+    """Delete a file from the camera SD card."""
+    if not force:
+        confirm = typer.confirm(f"Are you sure you want to permanently delete {directory}/{filename} from camera?")
+        if not confirm:
+            console.print("[yellow]Aborted.[/yellow]")
+            return
+
+    _, client = resolve_camera(target_ip=ip)
+    client.delete_file(directory=directory, filename=filename)
+    console.print(f"[green]✓ Deleted {directory}/{filename} from camera.[/green]")
+
+
+@media_app.command("format")
+def cmd_media_format(
+    confirm: bool = typer.Option(False, "--confirm", help="Must be passed to confirm formatting the SD card"),
+    ip: Optional[str] = typer.Option(None, "--ip", help="Target camera IP"),
+):
+    """Format the camera SD card. WARNING: Irreversibly deletes all media!"""
+    if not confirm:
+        err_console.print("[bold red]Safety Check:[/bold red] You must supply --confirm to format the SD card.")
+        raise typer.Exit(code=1)
+
+    double_check = typer.confirm("DANGER: This will erase the ENTIRE SD card. Do you really want to proceed?")
+    if not double_check:
+        console.print("[yellow]Aborted.[/yellow]")
+        return
+
+    _, client = resolve_camera(target_ip=ip)
+    client.format_sd_card()
+    console.print("[bold green]✓ Camera SD card format requested.[/bold green]")
 
 
 # -----------------------------------------------------------------------------

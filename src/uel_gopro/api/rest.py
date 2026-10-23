@@ -157,6 +157,18 @@ class GoProRestClient:
         """Deletes a single file from the camera SD card."""
         self._get("/gopro/media/delete/file", params={"path": f"{directory}/{filename}"})
 
+    def format_sd_card(self) -> None:
+        """Formats the camera SD card."""
+        self._get("/gopro/media/format")
+
+    def get_presets(self) -> Dict[str, Any]:
+        """Retrieves list of presets available on the camera."""
+        return self._get("/gopro/camera/presets/get")
+
+    def load_preset(self, preset_id: int) -> None:
+        """Loads a specific preset by ID."""
+        self._get("/gopro/camera/presets/load", params={"id": preset_id})
+
     def keep_alive(self) -> None:
         """Pings the keep-alive endpoint to maintain Wi-Fi / connection lease."""
         self._get("/gopro/camera/keep_alive")
