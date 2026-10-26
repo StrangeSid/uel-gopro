@@ -1,246 +1,330 @@
 # UEL-GoPro
 
 > **Unofficial Extended Life GoPro Toolchain**
-> A local-first, scriptable CLI toolchain.
+> A local-first, scriptable CLI for OpenGoPro-compatible cameras.
 
 ---
 
-## Overview
+## What this is
 
-GoPro's software ecosystem has steadily degraded for desktop and technical users:
-- Desktop tooling was abandoned in favor of ad-heavy mobile applications.
-- Bulk media downloads and multi-device workflows are gated behind subscription paywalls.
-- Embedded telemetry (GPS and IMU sensor data) is locked inside binary formats, while webcam utilities frequently break with firmware updates.
+UEL-GoPro is a command-line toolchain for GoPro cameras. It talks to the
+camera directly over USB CDC-ECM or the camera's Wi-Fi access point, and adds
+local post-processing for chapter stitching, timestamps, GPMF GPS telemetry,
+and GoPro Labs QR codes.
 
-**UEL-GoPro** provides a unified command-line toolchain for all GoPro operations: wired USB-C control, chapter-aware media ingest, lossless stream stitching, native GPMF telemetry extraction, optical QR automation, and live streaming.
+It is **alpha software**. The OpenGoPro HTTP API is the primary interface. Some
+endpoints only exist on newer cameras, and Bluetooth and USB-MTP support are
+narrower than the wired and Wi-Fi path.
 
----
-
-## Key Features
-
-- **USB CDC-ECM Auto-Detection:** Automatically discovers cameras at `172.2X.1XX.51:8080` without manual IP configuration.
-- **32-Bit Firmware Bug Mitigation:** Bypasses GoPro firmware's `/gopro/media/list` 4 GB integer overflow bug by querying authoritative 64-bit HTTP `HEAD` `Content-Length`.
-- **Resumable Downloader:** Parallel chunked downloads using `.partial` files, HTTP `Range` requests, and byte integrity validation.
-- **Lossless Chapter Stitcher:** Concatenates split video chapters (`GX010042.MP4`, `GX020042.MP4`) via FFmpeg concat demuxer without re-encoding, preserving multi-channel audio, timecode, and `gpmd` telemetry tracks.
-- **Native GPMF Telemetry Parser:** Decodes binary KLV metadata (GPS5, accelerometer, gyroscope) and exports to GPX, KML, GeoJSON, and CSV.
-- **In-Terminal QR Generator:** Generates high-contrast Unicode half-block QR codes directly inside the terminal window for instant optical configuration via GoPro Labs firmware.
-- **Live Streaming & Webcam:** Zero-latency preview streaming directly to `mpv` or `ffplay`, plus native 1080p/720p USB webcam mode.
+Current version: **0.1.1** (source). The latest PyPI release is **0.1.0** and
+doesn't contain the fixes in this tree. See [Installation](#installation).
 
 ---
 
-## Requirements & Prerequisites
+## Features
 
-- **Python:** 3.11 or newer (Python 3.13 recommended)
-- **uv:** Modern, fast Python package manager ([installation instructions](https://docs.astral.sh/uv/))
-- **FFmpeg:** Required for chapter concatenation and GPMF telemetry extraction
+- Commands resolve a camera through manual IP, USB CDC-ECM
+  (`172.2X.1XX.51:8080`), or the camera Wi-Fi AP (`10.5.5.9:8080`). `discover`
+  scans USB, the macOS MTP fallback, and optionally BLE.
+- A status dashboard built from OpenGoPro status IDs: battery percentage and
+  bars, charging, recording, SD state and free space, preset group, remaining
+  photos and video time, and an overheat warning.
+- Recording control for shutter start and stop, plus photo capture when the
+  camera is already in a Photo preset.
+- The CLI lists, reads, and writes settings, and lists and loads presets.
+- The media commands list files. HTTP downloads resume with `.partial` files
+  and HTTP Range, use `HEAD` for the authoritative size with a ranged-GET
+  fallback, and verify the byte count. The macOS MTP fallback does not resume.
+- Chapter stitching uses the FFmpeg concat demuxer with `-map 0 -c copy` and
+  keeps video, audio, timecode, and `gpmd` telemetry tracks. `stitch` restores
+  the first chapter's capture timestamp when the container exposes one.
+- GPMF GPS extraction uses a native KLV parser for GPS5 or GPS9 streams and
+  exports GPX, KML, GeoJSON (with `bbox`), and CSV. The parser detects IMU
+  streams but does not export them yet.
+- GoPro Labs QR support renders codes in the terminal with half blocks,
+  exports PNG and SVG, and includes a small preset library.
+- Preview and webcam commands start the camera's preview stream and can launch
+  `mpv` or `ffplay`, or start USB webcam mode at 480p/720p/1080p with a chosen
+  field of view.
+- GoPro Plus cloud mirroring provides paginated listing and resumable
+  downloads with a user-supplied bearer token. It uses an undocumented GoPro
+  API.
+
+---
+
+## Requirements
+
+- Python 3.11 or newer (3.13 recommended)
+- uv for the recommended install path ([install uv](https://docs.astral.sh/uv/))
+- FFmpeg for chapter stitching and GPMF extraction
+- mpv or ffplay for live preview (optional)
+- A GoPro camera compatible with the OpenGoPro HTTP API. HERO9 and newer
+  cameras cover the core API. `/gopro/camera/info` and some webcam controls
+  need HERO12+.
 
 ---
 
 ## Installation
 
-### 1. One-Line Script (Recommended)
-
-Installs `uel-gopro` directly to `~/.local/bin` using `uv` or an isolated Python virtual environment:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/StrangeSid/uel-gopro/main/install.sh | bash
-```
-
-### 2. Homebrew (macOS / Linux)
-
-Install from the local formula or tap:
-
-```bash
-# Direct formula build
-brew install --build-from-source Formula/uel-gopro.rb
-
-# Or via tap
-brew tap StrangeSid/uel-gopro
-brew install uel-gopro
-```
-
-### 3. PyPI (`uv` / `pip`)
-
-```bash
-# Using uv (isolated CLI tool)
-uv tool install uel-gopro
-
-# Using pip
-pip install uel-gopro
-```
-
-### 4. Build from Source or Standalone Binary
+### Recommended: from source
 
 ```bash
 git clone https://github.com/StrangeSid/uel-gopro.git
 cd uel-gopro
 uv sync
+uv tool install .
+# or run without installing:
+uv run uel-gopro --help
+```
 
-# Build a zero-dependency standalone binary:
-uv run pyinstaller --onefile --name uel-gopro --clean src/uel_gopro/cli/main.py
+This installs the current source tree (0.1.1). Use this path until a fixed
+release is published.
+
+### One-line installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StrangeSid/uel-gopro/main/install.sh | bash
+```
+
+The installer uses `uv` when available and installs from the `main` branch
+when `git` is available. If `uv` is unavailable, it creates an isolated virtual
+environment under `~/.local/share/uel-gopro`. If `git` is unavailable, it
+installs the last PyPI release.
+
+### PyPI
+
+```bash
+uv tool install uel-gopro
+# or
+pip install uel-gopro
+```
+
+The current PyPI release is **0.1.0**. It predates the fixes in this tree.
+
+### Homebrew (HEAD only)
+
+There is no stable Homebrew tap or release yet. From a checkout:
+
+```bash
+brew install --HEAD ./Formula/uel-gopro.rb
+```
+
+This builds the current `main` branch. It depends on Homebrew's `python@3.13`
+and `ffmpeg`.
+
+### Standalone binary
+
+PyInstaller can build a single-file executable locally, but the project
+publishes no prebuilt binary:
+
+```bash
+uv run pyinstaller --onefile --name uel-gopro --paths src --clean src/uel_gopro/cli/main.py
 ./dist/uel-gopro --help
 ```
 
+BLE backends and macOS MTP/PyObjC may require additional platform libraries
+when frozen. Test the binary on the target machine.
+
+### MTP on macOS
+
+MTP media fallback uses ImageCaptureCore through PyObjC. `bleak` normally
+pulls Cocoa in on macOS. The project also declares the dependency explicitly:
+
+```bash
+pip install "uel-gopro[mtp]"
+```
+
+MTP is only available on macOS and only for listing and downloading media.
+Camera control commands still require USB CDC-ECM or Wi-Fi.
+
 ---
 
-## CLI Command Reference
+## Transport support
 
-### Discovery & Status
+| Transport | Discovery | Control | Media | Notes |
+|---|---|---|---|---|
+| USB CDC-ECM | Automatic | Yes | Yes | Camera must be in GoPro Connect mode |
+| Wi-Fi AP `10.5.5.9` | Automatic/manual | Yes | Yes | Uses the camera's own AP |
+| Manual IP `--ip` | Explicit | Yes | Yes | Plain HTTP on port 8080 |
+| USB MTP | Fallback | No | List/download | macOS only; media commands only |
+| BLE | `--ble` | Shutter | No | First discovered camera; no ack handling; Wi-Fi AP helper is not exposed in the CLI |
+| COHN (home network) | Not implemented | No | No | Not part of the current transport resolver |
+
+There's no automatic COHN/mDNS discovery and no automatic MTP/BLE fallback
+for control commands.
+
+---
+
+## Command reference
+
+### Discovery and status
 
 ```bash
-# Auto-detect connected cameras over USB (GoPro Connect or MTP mode) and BLE
 uel-gopro discover
-
-# Scan for Bluetooth Low Energy (BLE) GoPro cameras
 uel-gopro discover --ble
-
-# Display real-time status dashboard (battery, storage, thermals, recording mode)
 uel-gopro status
-
-# Query real-time status wirelessly over Bluetooth Low Energy
-uel-gopro status --ble
-
-# Output status dashboard as structured JSON
 uel-gopro status --json
+uel-gopro status --ble
 ```
 
-> [!TIP]
-> UEL-GoPro supports two USB connection modes:
-> - **GoPro Connect (CDC-ECM):** Full camera control, shutter, webcam, live streaming, settings, and high-speed downloads (40 MB/s).
-> - **MTP Mode:** File listing and media downloading without changing camera settings. Control commands fallback or prompt to switch to GoPro Connect.
+`status` uses the OpenGoPro status map. When `/gopro/camera/info` is available
+(HERO12+), the dashboard also shows the real model, firmware, and serial
+number. Older cameras keep the generic transport label.
 
-### Recording & Shutter
+### Recording
 
 ```bash
-# Start video recording or timelapse
 uel-gopro record start
-
-# Stop recording
 uel-gopro record stop
-
-# Capture a still photograph
-uel-gopro record photo
+uel-gopro record photo            # requires a Photo preset
+uel-gopro record photo --force    # trigger regardless of current mode
 ```
 
-### Camera Settings & Presets
+`record photo` checks the current preset group and exits with an error outside
+a Photo preset unless you pass `--force`. Over BLE it can't read the mode, so
+without `--force` it warns and triggers the camera's current mode.
+
+### Presets and settings
 
 ```bash
-# List available camera presets
 uel-gopro preset list
-
-# Activate a preset by ID
 uel-gopro preset load 1000
 
-# Inspect camera settings
 uel-gopro config list
 uel-gopro config get 2
-
-# Update a camera setting (e.g., setting ID 2 to value 1)
-uel-gopro config set 2 1
+uel-gopro config get resolution
+uel-gopro config set resolution 4
 ```
 
-### Media Ingest & SD Card Management
+The current setting aliases are `resolution` (2), `fps` (3), `fov` (121), and
+`bitrate` (182). Older cameras may use different IDs, so pass a numeric ID.
+Bitrate and FOV option values are camera-dependent enums, not Mbps or
+millimetres.
+
+### Media
 
 ```bash
-# List media stored on the camera SD card
 uel-gopro media list
-
-# Download a video with progress tracking and size validation
 uel-gopro media download GX010042.MP4 --dest ~/Videos/GoPro
-
-# Delete a specific file from the SD card
 uel-gopro media delete GX010042.MP4 --force
 ```
 
-> [!WARNING]
-> Formatting an SD card irreversibly erases all footage. UEL-GoPro requires explicit confirmation:
-> ```bash
-> uel-gopro media format --confirm
-> ```
+`media download` treats `--dest` as a directory unless it already exists as a
+file or has a file suffix. It downloads one file at a time, resumes partial
+files, and checks the byte count against the camera's authoritative size.
 
-### Chapter Stitching & Post-Processing
+SD-card formatting is not supported. The OpenGoPro HTTP API doesn't expose a
+format endpoint, so use the camera UI.
 
-GoPro splits long recordings into multiple chapter files. UEL-GoPro stitches them into a single contiguous file without re-encoding:
+### Stitching and timestamps
 
 ```bash
-# Losslessly stitch chapters in a directory
 uel-gopro process stitch /path/to/chapters/ --output stitched.mp4
-
-# Synchronize file modification dates with true capture timestamps
 uel-gopro process sync-dates GX010042.MP4
 ```
 
-> [!TIP]
-> Stitching uses stream copy mode (`-c copy -map 0`), preserving all embedded GPS and telemetry tracks for post-processing.
+`stitch` uses FFmpeg stream copy (`-map 0 -c copy`). It writes to a temporary
+file and only replaces the destination after FFmpeg succeeds. It restores the
+first chapter's capture timestamp when the container exposes one. `--output`
+is only valid for a single chapter group.
 
-### GPMF Sensor Telemetry Extraction
-
-Extract embedded sensor telemetry from GoPro MP4 files into standard geospatial formats:
+### GPS telemetry
 
 ```bash
-# Export GPS track to GPX (for Strava, Garmin, or GIS tools)
 uel-gopro telemetry export GX010042.MP4 --format gpx --output track.gpx
-
-# Export to KML (Google Earth)
-uel-gopro telemetry export GX010042.MP4 --format kml --output track.kml
-
-# Export to GeoJSON
-uel-gopro telemetry export GX010042.MP4 --format geojson --output track.geojson
-
-# Export to tabular CSV
-uel-gopro telemetry export GX010042.MP4 --format csv --output track.csv
+uel-gopro telemetry export GX010042.MP4 --format kml
+uel-gopro telemetry export GX010042.MP4 --format geojson
+uel-gopro telemetry export GX010042.MP4 --format csv
 ```
 
-### GoPro Labs QR Automation
+Only GPS points are exported. The parser selects the GPS5 or GPS9 sample
+layout from the fourcc. GPSU timestamps are approximate because the parser
+doesn't read `GPSP` precision time yet. The parser detects accelerometer and
+gyroscope streams but does not decode them.
 
-Render optical macro programming codes directly on your screen without leaving the terminal:
+### GoPro Labs QR codes
 
 ```bash
-# List available macro presets
 uel-gopro labs presets
-
-# Render a high-contrast half-block QR code in the terminal
 uel-gopro labs qr bitrate_max
-uel-gopro labs qr motion_detect
-uel-gopro labs qr speed_trigger_50kmh
-
-# Generate a custom Labs macro and save as PNG/SVG
-uel-gopro labs qr "!M1*BITR=180" --save macro.png
+uel-gopro labs qr "!M1" --save macro.png
+uel-gopro labs qr "!M1" --invert
 ```
 
-### Live Preview & USB Webcam
+The terminal renderer uses two rows per character cell and a four-module quiet
+zone. By default it uses standard polarity, with black modules on white.
+`--invert` produces white modules on a black terminal background. Verify the
+code scans on your camera before relying on it.
+
+### Preview and webcam
 
 ```bash
-# Launch zero-latency preview stream in mpv or ffplay
+uel-gopro stream preview
 uel-gopro stream preview --player mpv
+uel-gopro stream preview --no-player
 
-# Start 1080p USB webcam mode
-uel-gopro stream webcam start --res 1080p
-
-# Stop USB webcam mode
+uel-gopro stream webcam start --res 1080p --fov linear
 uel-gopro stream webcam stop
 ```
 
-### GoPro Plus Cloud Sync (NAS Backup)
+Webcam codes follow the OpenGoPro API: 480p=4, 720p=7, 1080p=12. Field of
+view: wide=0, narrow=2, superview=3, linear=4.
 
-Bypass the official web interface's 25-file bulk download ceiling and mirror your complete GoPro Plus cloud library:
+### GoPro Plus cloud
 
 ```bash
-# Store your GoPro Plus authentication token
-uel-gopro cloud auth --token <YOUR_BEARER_TOKEN>
-
-# Browse cloud media assets with pagination
+uel-gopro cloud auth --token <bearer-token>
 uel-gopro cloud list --page 1 --per-page 25
-
-# Headless mirror of cloud assets to local storage or NAS
 uel-gopro cloud sync --dest /mnt/nas/GoProCloudBackup --max-pages 100
 ```
 
-> [!NOTE]
-> Cloud sync uses atomic `.partial` staging buffers and checks file sizes, skipping assets that are already safely archived.
+`cloud auth` stores the token in `~/.config/uel-gopro/cloud.json` with mode
+`0600`. Cloud sync uses pagination, skips files whose size already matches,
+keeps partial buffers on network failure, and avoids overwriting a different
+asset that shares a filename. The API is undocumented and may change without
+notice. There's no OAuth flow.
+
+---
+
+## Known limitations
+
+- No COHN/mDNS support. Manual IP is plain HTTP only.
+- MTP is macOS-only and limited to media listing and download.
+- No SD-card format command.
+- No parallel downloads. Downloads resume sequentially.
+- BLE is minimal. The CLI exposes shutter control. The client has a Wi-Fi AP
+  helper, but no command calls it. There is no response or ack parsing, pairing
+  UI, or multi-camera selection.
+- IMU telemetry isn't exported. Only GPS points are parsed into tracks.
+- GPS timestamps are approximate because `GPSP` isn't parsed.
+- Cloud support is unofficial and token-based.
+- Windows isn't supported.
+- No hardware-in-the-loop test suite. CI covers protocol construction,
+  parsers, and filesystem behavior with mocks.
+
+---
+
+## Development
+
+```bash
+uv sync
+uv run pytest -q
+uv run ruff check src tests
+uv build
+```
+
+The test suite runs offline and uses mocked camera responses, synthetic MP4
+boxes, synthetic GPMF KLV streams, and `httpx.MockTransport`. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+CI runs Python 3.11 to 3.13, Ruff, tests, and a distribution build. The
+publish workflow runs tests, checks that the release tag matches
+`pyproject.toml`, and uploads to PyPI.
 
 ---
 
 ## Disclaimer
 
-GoPro, HERO, and MAX are registered trademarks of GoPro, Inc. UEL-GoPro is an independent, community-driven open-source project and is not affiliated with, sponsored by, or endorsed by GoPro, Inc.
+GoPro, HERO, and MAX are registered trademarks of GoPro, Inc. UEL-GoPro is an
+independent open-source project and isn't affiliated with,
+sponsored by, or endorsed by GoPro, Inc. Use at your own risk.

@@ -1,224 +1,221 @@
-# UEL-GoPro System Architecture
+# UEL-GoPro architecture
 
-This document details the architectural design and low-level mechanics of **UEL-GoPro** (Unofficial Extended Life GoPro Toolchain).
+UEL-GoPro talks to cameras through the [OpenGoPro HTTP API](https://gopro.github.io/OpenGoPro/http/)
+and the OpenGoPro BLE protocol. The transports are USB CDC-ECM, camera Wi-Fi
+AP, and manual IP. On macOS the CLI can also read media over MTP, and BLE
+handles scanning and commands.
 
-```
-                      +-----------------------------+
-                      |      uel-gopro CLI          |
-                      |   (Typer + Rich Engine)     |
-                      +-----------------------------+
-                                     |
-              +----------------------+----------------------+
-              |                      |                      |
-              v                      v                      v
-     +-----------------+    +-----------------+    +-----------------+
-     | Transport Layer |    | Media Pipeline  |    | Telemetry / Labs|
-     | Auto-Negotiate  |    | (Ingest/Stitch) |    |  (GPMF & QR)    |
-     +-----------------+    +-----------------+    +-----------------+
-```
-
----
-
-## The 5-Layer Core Architecture
-
-### 1. Transport Auto-Negotiation Layer
-
-GoPro cameras communicate over multiple heterogeneous physical and link-layer transports. UEL-GoPro implements a priority-based auto-negotiation resolver:
+## High-level layout
 
 ```
-                  +---------------------------+
-                  |  Resolve Camera Transport |
-                  +---------------------------+
-                                |
-             +------------------v------------------+
-             | User explicit --ip specified?       |
-             +------------------+------------------+
-                       | YES             | NO
-                       v                 v
-            [ Probe target IP ]    [ 1. Probe USB CDC-ECM ]
-                                   (172.2X.1XX.51:8080)
-                                         |
-                                         v Found?
-                                  +------+------+
-                                  | YES         | NO
-                                  v             v
-                             [ Connect ]   [ 2. Probe COHN LAN ]
-                                           (Home Wi-Fi mDNS / DHCP)
-                                                |
-                                                v Found?
-                                         +------+------+
-                                         | YES         | NO
-                                         v             v
-                                    [ Connect ]   [ 3. Probe Wi-Fi AP ]
-                                                  (10.5.5.9:8080)
-                                                       |
-                                                       v Found?
-                                                +------+------+
-                                                | YES         | NO
-                                                v             v
-                                           [ Connect ]   [ 4. BLE GATT / Fail ]
+┌──────────────────────────────────────────────────────────────┐
+│ CLI (Typer + Rich)                                          │
+│ discover, status, record, config, preset, media, process,   │
+│ telemetry, stream, labs, cloud                              │
+└───────────────┬───────────────────────────────┬──────────────┘
+                │                               │
+┌───────────────▼──────────────┐   ┌────────────▼──────────────┐
+│ Transport                    │   │ Local processing          │
+│ - USB CDC-ECM discovery      │   │ - FFmpeg chapter stitching│
+│ - Wi-Fi AP / manual IP       │   │ - MP4 timestamp parsing   │
+│ - MTP media fallback (macOS) │   │ - GPMF GPS parsing        │
+│ - BLE scanner/commands       │   │ - QR rendering            │
+└───────────────┬──────────────┘   └────────────┬──────────────┘
+                │                               │
+┌───────────────▼───────────────────────────────▼──────────────┐
+│ Core: Pydantic models, exceptions, REST client               │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-#### Priorities:
-1. **USB CDC-ECM (Ethernet over USB):**
-   - **Throughput:** ~30–40 MB/s.
-   - **Mechanics:** When connected via USB-C in GoPro Connect / MTP mode, the camera enumerates as a USB CDC-ECM Ethernet adapter. The host machine is assigned an IP in a dynamic subnet (`172.2X.1XX.2`), while the camera binds strictly to `.51` on port `8080` (e.g. `172.24.162.51:8080`).
-   - **Detection:** `uel_gopro.transport.usb.detect_usb_camera()` scans all active network interfaces using `psutil.net_if_addrs()` matching `^172\.(2[0-9])\.(\d{1,3})\.(\d{1,3})$`, infers the camera IP, and performs an HTTP probe against `/gopro/camera/state`.
-2. **COHN (Camera on Home Network):**
-   - **Throughput:** ~10–20 MB/s (Local Wi-Fi).
-   - **Mechanics:** Introduced in HERO12/13 firmware. The camera joins the user's local Wi-Fi router (station mode). It obtains an IP via home DHCP and advertises via mDNS (`_gopro-web._tcp.local`) or can be targeted directly by IP.
-3. **Wi-Fi Access Point (Station Mode on Host):**
-   - **Throughput:** ~8–15 MB/s.
-   - **Mechanics:** The camera acts as a software AP broadcasting an SSID. When the host joins, the camera gateway is fixed at `10.5.5.9:8080`.
-4. **Bluetooth Low Energy (BLE GATT):**
-   - **Throughput:** Low-bandwidth command/control (~few KB/s).
-   - **Mechanics:** Used for waking up Wi-Fi AP, issuing shutter commands, or initial Wi-Fi provisioning without active IP connection.
+There is no global configuration file. Camera settings live on the camera,
+cloud credentials live in `~/.config/uel-gopro/cloud.json`, and download/output
+paths are CLI options.
 
----
+## 1. Transport resolution
 
-### 2. 32-Bit Integer File Size Bug & HTTP HEAD Mitigation
+`transport/manager.py` resolves a camera in this order:
 
-#### The Firmware Bug:
-In modern GoPro firmware (HERO9 through HERO13), the camera's internal media server exposes `/gopro/media/list` returning JSON records of media on the SD card:
+1. An explicit `--ip` address: plain HTTP on port 8080.
+2. USB CDC-ECM: scan host interfaces for addresses that start with `172.20.`
+   through `172.29.`, then probe the camera's `.51` address on port 8080.
+3. Camera Wi-Fi AP: probe `10.5.5.9:8080`.
 
-```json
-{
-  "id": "100GOPRO",
-  "media": [
-    {
-      "d": "100GOPRO",
-      "fs": [
-        {
-          "n": "GX010450.MP4",
-          "s": "4294967295"
-        }
-      ]
-    }
-  ]
-}
+`transport/usb.py` calls `psutil.net_if_addrs()`, builds the camera address
+from the host subnet (`.51`), and probes `/gopro/camera/state` before it
+accepts a match. The probe uses a 2-second timeout by default.
+
+### Explicit fallbacks
+
+- MTP backs only `media list` and `media download`, and only when HTTP
+  resolution raises `CameraNotFoundError`. It uses ImageCaptureCore through
+  PyObjC, so it is macOS-only. Camera-control commands never fall back to MTP.
+- BLE runs only when the user passes `--ble`. It is not part of automatic
+  transport negotiation.
+- COHN (camera on the home network) and mDNS are not implemented. The tree has
+  no HTTPS or certificate handling and no mDNS discovery.
+
+## 2. Status and settings
+
+`api/rest.py` parses `/gopro/camera/state` with the current OpenGoPro status
+IDs:
+
+| ID | Meaning | Use |
+|---|---|---|
+| 2 | Internal battery bars (4 = charging) | `battery_bars`, `is_charging` |
+| 6 | Overheating | `system_hot` |
+| 8 | Busy | diagnostic only |
+| 10 | Encoding | `is_recording`, `encoding_active` |
+| 33 | Primary storage (`-1/0/1/2/3/4/8`) | `sd_status` |
+| 34 | Remaining photos | `sd_remaining_photos` |
+| 35 | Remaining video time | `sd_remaining_video_time_sec` |
+| 54 | SD card remaining (KB) | `sd_remaining_mb` |
+| 70 | Internal battery percentage | `battery_percent` (fallback: bars) |
+| 96 | Preset group (`1000` video, `1001` photo, `1002` timelapse, `2000` general) | `current_mode` |
+| 97 | Preset ID | `current_preset` |
+
+The parser accepts numeric strings and skips fields it cannot convert. Real
+camera state contains strings and empty strings (for example, `29` is the
+connected Wi-Fi SSID), so one bad field must not break the status output.
+
+`/gopro/camera/info` is optional: it is used by `status` when available
+(HERO12+) and failures are ignored on older cameras.
+
+Settings are written with:
+
+```
+GET /gopro/camera/setting?setting=<id>&option=<value>
 ```
 
-The `s` (size in bytes) field is formatted as an unsigned 32-bit integer (`uint32_t`, max value $2^{32} - 1 = 4,294,967,295$ bytes). When recording long 4K/5.3K video clips with high bitrates or SD cards formatted with exFAT (where chapter limits can reach ~12 GB in newer firmware), file sizes exceeding 4 GB either:
-1. **Truncate / Wrap around modulo $2^{32}$** (e.g., a 5.2 GB file reports as ~905 MB).
-2. **Clamp to `4294967295`** ($4 \text{ GiB} - 1 \text{ byte}$).
+The parameter is `option`, not `opt`. The CLI exposes modern aliases
+(`resolution=2`, `fps=3`, `fov=121`, `bitrate=182`); callers can pass a numeric
+ID when a camera uses a different setting.
 
-If a downloader relies on `/gopro/media/list` for progress tracking, verification, or chunk calculation, the downloaded file is either prematurely truncated or flagged as corrupt.
+## 3. Media download
 
-#### The Mitigation:
-UEL-GoPro never trusts the file size in the media listing. Instead:
-1. `uel_gopro.media.downloader.get_remote_file_size(url)` issues an **HTTP HEAD** request directly to `/videos/DCIM/{directory}/{filename}`.
-2. The camera's embedded HTTP daemon correctly returns the 64-bit size in the standard `Content-Length` header.
-3. Downloads are written to a `.partial` file in chunks using HTTP `Range` headers, verified against the HEAD content length, and atomically renamed to `.MP4` upon completion.
+`media/downloader.py` implements:
 
----
+1. Authoritative size lookup. `HEAD` the download URL. If the camera rejects
+   `HEAD` (405/501) or omits `Content-Length`, fall back to a one-byte ranged
+   `GET` and read `Content-Range`/`Content-Length`. This avoids trusting the
+   32-bit `s` field in `/gopro/media/list`.
+2. Resume. Existing `.partial` bytes produce `Range: bytes=N-`.
+3. Restart handling. A `200` response to a ranged request resets the buffer; a
+   `416` restarts from zero.
+4. Verification. The final byte count must match the authoritative size.
+5. Atomic publish. The `.partial` file is renamed to the destination only after
+   verification.
 
-### 3. Lossless Chapter Stitching Mechanics
+Downloads are sequential; there's no parallel chunk scheduler.
 
-#### Chaptering Structure:
-GoPro cameras split long recordings into chapters to minimize data loss in the event of power cuts or file system corruption:
-- **Modern Naming (HERO6 through HERO13):**
-  - Pattern: `G{X|H|S|L}{chap:02d}{base:04d}.{MP4|LRV|360}`
-  - Example: Base recording `0123` produces `GX010123.MP4` (Chapter 1), `GX020123.MP4` (Chapter 2), `GX030123.MP4` (Chapter 3).
-  - Prefix `GX` = HEVC (H.265), `GH` = AVC (H.264), `GL` = Low Resolution Video, `GS` = MAX 360 Video.
-- **Legacy Naming (HERO5 and older):**
-  - Chapter 1: `GOPR0789.MP4`
-  - Chapter 2+: `GP010789.MP4`, `GP020789.MP4`, etc.
+`media download --dest` treats a non-existent path without a suffix as a
+directory and creates it. An existing file, or a path with a suffix, is used as
+the target file.
 
-#### Concatenation Mechanics:
-Transcoding or naive re-encoding degrades video quality, consumes massive CPU/GPU time, and strips embedded metadata.
+## 4. Chapter stitching
 
-UEL-GoPro uses the **FFmpeg Concat Demuxer** in stream copy mode:
+GoPro chapter naming:
 
-1. **Manifest Generation:**
-   A temporary concat manifest is written with escaped file paths:
-   ```
-   file '/absolute/path/to/GX010123.MP4'
-   file '/absolute/path/to/GX020123.MP4'
-   file '/absolute/path/to/GX030123.MP4'
-   ```
-2. **Stream-Copy Invocation:**
-   ```bash
-   ffmpeg -y -f concat -safe 0 -i manifest.txt -map 0 -c copy output.mp4
-   ```
-3. **Preserving `gpmd` Telemetry:**
-   The `-map 0` flag is critical: standard FFmpeg concatenation maps only default video and audio streams. GoPro MP4 files contain additional metadata tracks:
-   - Stream 0:0: H.264 / HEVC Video.
-   - Stream 0:1: AAC Audio.
-   - Stream 0:2: `tmcd` (QuickTime Timecode).
-   - Stream 0:3: `gpmd` (GoPro Metadata Format binary stream).
-   Using `-map 0 -c copy` ensures that the `gpmd` track is passed through verbatim and remains contiguous across all joined chapters, allowing post-stitching GPS/gyroscope extraction.
+- Modern: `GX010123.MP4`, `GH020123.MP4`, `GL010123.LRV`, `GS010123.360`
+- Legacy: `GOPR0789.MP4`, `GP010789.MP4`
 
----
+`media/stitcher.py` groups by base ID and concatenates with:
 
-### 4. GPMF Binary KLV Parser Architecture
-
-GoPro embeds telemetry directly in the MP4 container as a binary track with FourCC handler `gpmd`.
-
-#### Container Extraction:
-UEL-GoPro uses `ffmpeg` to extract the raw GPMF byte payload without demuxing overhead:
 ```bash
-ffmpeg -y -i input.mp4 -map 0:m:handler_name:"GoPro MET" -c copy -f rawvideo gpmf.bin
-```
-*(With automatic fallback to `-map 0:d:0` or stream index search).*
-
-#### KLV Structure:
-The stream is encoded in big-endian Key-Length-Value (KLV) structures:
-- **FourCC (4 bytes):** ASCII identifier (e.g., `DEVC`, `STRM`, `GPS5`, `SCAL`, `SIUN`).
-- **Type Character (1 byte):** Data type:
-  - `'c'`: 8-bit signed char.
-  - `'s'`: 16-bit signed integer.
-  - `'S'`: 16-bit unsigned integer.
-  - `'l'`: 32-bit signed integer (`>i4`).
-  - `'L'`: 32-bit unsigned integer (`>u4`).
-  - `'f'`: 32-bit IEEE-754 float (`>f4`).
-  - `'U'`: UTC date/time string.
-  - `'\x00'`: Complex container or nested KLV list.
-- **Type Size (1 byte):** Byte size of a single unit.
-- **Repeat Count (2 bytes):** Number of elements in the sample.
-- **Payload (`Type Size * Repeat` bytes, padded to 32-bit boundary):**
-  - If `Type == 0`, the payload contains nested child KLV elements.
-
-```
-+--------------------+---------+-----------+--------------+--------------------------+
-| FourCC (4B)        | Type(1B)| Size (1B) | Repeat (2B)  | Payload (Size * Repeat)  |
-| "GPS5"             | 'l' (0x6C)| 4       | 5 * N        | [Lat, Lon, Alt, Spd, 2D] |
-+--------------------+---------+-----------+--------------+--------------------------+
+ffmpeg -y -nostdin -f concat -safe 0 -i manifest.txt -map 0 -c copy out.mp4
 ```
 
-#### Coordinate & Scale Decoding:
-- `SCAL`: Scale factors associated with subsequent sensors.
-- `GPS5`: Samples formatted as 5 signed 32-bit integers:
-  $$\text{Latitude} = \frac{\text{raw}_0}{\text{scale}_{\text{lat}}}, \quad \text{Longitude} = \frac{\text{raw}_1}{\text{scale}_{\text{lon}}}$$
-  $$\text{Altitude (m)} = \frac{\text{raw}_2}{\text{scale}_{\text{alt}}}, \quad \text{2D Speed (m/s)} = \frac{\text{raw}_3}{\text{scale}_{\text{spd}}}, \quad \text{3D Speed} = \frac{\text{raw}_4}{\text{scale}_{\text{3d}}}$$
-- `GPSU`: Base UTC timestamp (e.g. `YYMMDDHHMMSS.sss`). Offsets for individual samples within each second are linearly interpolated based on sample count.
+`-map 0` preserves secondary tracks such as `tmcd` and `gpmd`; `-c copy` avoids
+re-encoding. FFmpeg writes to a temporary `*.partial.*` file, which is renamed
+only on success. So a failed run doesn't truncate an existing output.
 
-#### Exporter Pipeline:
-The parsed `TelemetryTrack` object is fed to zero-dependency serialization exporters:
-- **GPX:** Standard `<trk>` and `<trkpt>` XML with elevation, speed, and ISO UTC timestamps.
-- **KML:** Google Earth `<LineString>` and coordinates tuple `<coordinates>lon,lat,alt ...</coordinates>`.
-- **GeoJSON:** RFC 7946 `LineString` feature with coordinate array `[lon, lat, alt]` and bounding box properties.
-- **CSV:** Tabular record `timestamp_iso,lat,lon,alt,speed_mps,fix`.
+FFmpeg's concat demuxer does not preserve `mvhd` creation time. The CLI
+therefore reads the first chapter's creation time and applies it to the
+stitched file with `os.utime`. If no timestamp can be recovered (common for
+GoPro files with a zero `mvhd` time), it prints a warning.
 
----
+`process stitch --output` is rejected for multiple chapter groups; without
+`--output`, one `STITCH_<base>.mp4` is written per group.
 
-### 5. GoPro Labs QR Code Generation & Terminal Half-Blocks
+## 5. GPMF telemetry
 
-GoPro Labs firmware interprets QR codes to configure deep camera settings and automation macros (e.g. `*BITR=180` for 180 Mbps high bitrate, `!M1` for optical motion detection, or `!08:00N` for scheduled wake-up).
+`telemetry/gpmf.py` parses GPMF KLV structures:
 
-```
-  Top row module    --> ▀ (U+2580) Upper half block
-  Bottom row module --> ▄ (U+2584) Lower half block
-```
+- Header: 4-byte FourCC, 1-byte type, 1-byte type size, 2-byte repeat,
+  big-endian, payload padded to 4 bytes.
+- Containers: `DEVC`, `STRM`, and type `0` are parsed recursively.
+- Scalar types: `c`, `U`, `F`, `b/B`, `s/S`, `l/L`, `f`, `d`, `j/J`.
+- GPS streams: `GPS5` (5 values/sample) and `GPS9` (9 values/sample). The
+  fourcc is authoritative; the parser doesn't guess between 5 and 9 based
+  only on divisibility.
+- Scale: `SCAL` values are applied to latitude, longitude, altitude, and speed.
+- Time: `GPS9` (and 7-field synthetic `GPS5`) carries days/seconds. Plain
+  `GPS5` uses the most recent `GPSU` and a nominal 18 Hz sample interval.
 
-#### The Problem:
-Standard QR codes rendered with ASCII full blocks `██` or spaces `  ` in terminal emulators produce a 2:1 vertical distortion because terminal font glyphs are typically twice as tall as they are wide. Cameras fail to scan distorted codes.
+Known limitations:
 
-#### Terminal Half-Block Engine:
-`uel_gopro.labs.qr.render_terminal_qr` computes an exact 1:1 square module aspect ratio by grouping pairs of vertical matrix rows:
-1. Two vertical pixels $(x, y)$ and $(x, y+1)$ are mapped into a single terminal character cell using Unicode half-blocks:
-   - Top light, bottom light $\rightarrow$ `' '` (space)
-   - Top dark, bottom dark $\rightarrow$ `'█'` (full block `U+2588`)
-   - Top dark, bottom light $\rightarrow$ `'▀'` (upper half block `U+2580`)
-   - Top light, bottom dark $\rightarrow$ `'▄'` (lower half block `U+2584`)
-2. ANSI background and foreground escape codes are configured for high-contrast scanning under camera lenses.
-3. Polarities can be inverted (`--invert`) to support both dark-background and light-background terminal themes.
+- `GPSP` (precision time) isn't parsed, so sub-second timestamps from plain
+  `GPS5` are approximate.
+- `ACCL` and `GYRO` streams only set `has_accel` / `has_gyro`; sample values are
+  not decoded or exported.
+- The exporter set is GPS-only: GPX, KML, GeoJSON, CSV. GeoJSON includes a
+  `bbox` and uses `Point` for a single-point track.
+
+`extract_gpmf_from_mp4` uses FFmpeg to copy the `GoPro MET` data track and
+falls back to the first data stream and alternate muxers. Raw `.bin`, `.raw`,
+and `.gpmf` files are passed through directly.
+
+## 6. GoPro Labs QR rendering
+
+`labs/qr.py` renders the QR matrix with Unicode half-blocks, two matrix rows
+per terminal row. The quiet zone is four modules. The default is standard
+polarity (black modules on a white background) via `30;47`; `--invert` uses
+white modules on black via `97;40` for dark terminals. PNG/SVG output is
+delegated to `segno`.
+
+The printed code is a convenience. Check that it scans before you rely on a
+Labs macro.
+
+## 7. Cloud sync
+
+`cloud/client.py` uses GoPro's undocumented media API with a bearer token. The
+token file is written atomically with mode `0600`. Sync behavior:
+
+- Pagination stops when the API returns the same page twice.
+- Sync skips a file that already exists with the expected size.
+- The client saves a different asset with the same filename under an asset ID
+  prefix.
+- The client keeps `.partial` buffers after a network error, so the next run
+  resumes.
+- A size mismatch deletes the invalid partial buffer.
+
+There is no OAuth flow and no official API guarantee. Treat cloud support as
+best-effort.
+
+## 8. CLI error model
+
+`uel_gopro.cli.main:main()` wraps the Typer app and converts `UelError` and
+`OSError` into a single red error line with exit code 1. `KeyboardInterrupt`
+exits 130. Command validation uses `typer.Exit(1)`. Click itself returns 2 for
+usage errors such as an unknown command or option.
+
+The CLI emits JSON for `discover`, `status`, `preset list`, `config get/list`,
+`media list`, and `cloud list` with `typer.echo` rather than Rich, so you can
+pipe it into other tools.
+
+## 9. Testing
+
+The suite runs offline:
+
+- REST and cloud tests use `httpx.MockTransport` or mocked clients.
+- Status tests use a captured OpenGoPro state payload plus string and
+  empty-field cases.
+- BLE tests assert the official SDK's wire bytes (`20 03 01 01 01` for shutter
+  start).
+- Media tests build synthetic MP4 boxes and cover HEAD fallback, resume, size
+  mismatch, and atomic rename.
+- GPMF tests build synthetic KLV streams for GPS5 (real type-size 4), GPS9
+  (9 values/sample), GPSU accumulation, and exporters.
+- Stitcher tests verify the manifest, FFmpeg arguments, temporary output, and
+  error paths.
+
+MTP tests skip when ImageCaptureCore is unavailable (for example on Linux).

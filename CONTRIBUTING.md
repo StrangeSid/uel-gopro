@@ -1,162 +1,129 @@
 # Contributing to UEL-GoPro
 
-Thank you for your interest in contributing to **UEL-GoPro** (Unofficial Extended Life GoPro Toolchain).
-
-UEL-GoPro is a local-first, open-source CLI built to give GoPro hardware an extended life independent of mobile apps, cloud subscriptions, and vendor lock-in.
-
----
-
-## Code of Conduct
-
-We are committed to providing a welcoming, productive, and harassment-free environment for all contributors. Please be respectful, constructive, and considerate in all interactions.
+UEL-GoPro (Unofficial Extended Life GoPro Toolchain) is a local-first,
+open-source CLI for OpenGoPro-compatible cameras. It is alpha software.
+Correctness against real camera firmware matters more than adding features.
 
 ---
 
-## Getting Started
+## Code of conduct
+
+Be respectful, constructive, and considerate in all interactions. Harassment is
+not tolerated.
+
+---
+
+## Getting started
 
 ### Prerequisites
 
-- **Python:** 3.11 or newer (Python 3.13 recommended)
-- **uv:** Ultra-fast Python package and project manager ([installation guide](https://docs.astral.sh/uv/getting-started/installation/))
-  ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  ```
-- **FFmpeg:** Required for media chapter stitching and telemetry extraction from MP4 containers
-  - **macOS:** `brew install ffmpeg`
-  - **Ubuntu / Debian:** `sudo apt-get install ffmpeg`
-  - **Arch Linux:** `sudo pacman -S ffmpeg`
+- Python 3.11 or newer (3.13 recommended)
+- uv ([installation guide](https://docs.astral.sh/uv/getting-started/installation/))
+- FFmpeg for chapter stitching and telemetry extraction
+- mpv or ffplay for preview streaming (optional)
 
-### Workspace Setup
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/StrangeSid/uel-gopro.git
-   cd uel-gopro
-   ```
-
-2. **Sync the virtual environment and dependencies:**
-   ```bash
-   uv sync
-   ```
-
-3. **Verify installation by running the test suite:**
-   ```bash
-   uv run pytest
-   ```
-
-4. **Run the local CLI binary in development mode:**
-   ```bash
-   uv run uel-gopro --help
-   ```
-
----
-
-## Development & Code Standards
-
-### Python Standards
-
-- **Python 3.11+ syntax:** Use modern standard library features and typing:
-  - `from __future__ import annotations` at the top of every module.
-  - Pipe union syntax: `str | None` instead of `Optional[str]`.
-  - Built-in generics: `list[str]`, `dict[str, Any]` instead of `typing.List`, `typing.Dict`.
-- **Strict type hints:** All public functions, methods, and classes must have complete type annotations.
-- **Data models:** Use `pydantic` or `@dataclass` for typed data models and schemas.
-
-### Karpathy Guidelines for Contributions
-
-We follow surgical, simplicity-first engineering principles:
-
-1. **Simplicity First:**
-   - Solve the immediate problem with the minimum amount of code necessary.
-   - Avoid speculative generalizations, premature abstractions, or unused configuration options.
-   - If a solution requires 50 lines, do not write 200 lines.
-2. **Surgical Changes:**
-   - Touch only the code and files required to fulfill your change.
-   - Do not reformat adjacent, unrelated lines or "clean up" unrelated files in feature PRs.
-   - Keep pull requests tightly scoped to a single purpose.
-3. **Surface Assumptions:**
-   - Document any hardware quirks, firmware discrepancies, or protocol limitations you encounter.
-   - Make verifiable claims backed by reproducible tests.
-
----
-
-## Testing Without Physical Hardware
-
-You do **not** need a physical GoPro connected to contribute or run tests. The test suite is designed to run 100% offline in CI environments and developer workstations.
-
-### Mock Test Architecture
-
-All hardware and network layers are isolated via mocks in `tests/`:
-
-- **REST API & Network Calls (`httpx`):**
-  We mock HTTP responses from the GoPro OpenGoPro HTTP daemon using `monkeypatch` or `pytest-mock`. Endpoints such as `/gopro/camera/state` and `/gopro/media/list` return synthetic JSON payloads.
-  ```python
-  def test_camera_status_mock(monkeypatch):
-      class MockResponse:
-          status_code = 200
-          def json(self):
-              return {"status": {"1": 100, "2": 0, "8": 0, "10": 0, "6": 128000}}
-          def raise_for_status(self):
-              pass
-
-      class MockClient:
-          def get(self, url, **kwargs):
-              return MockResponse()
-
-      monkeypatch.setattr("httpx.Client", MockClient)
-  ```
-
-- **Wired USB CDC-ECM Interface Scanning:**
-  Network interface discovery via `psutil.net_if_addrs()` is mocked to simulate host network adapters assigned to the GoPro subnet (`172.2X.1XX.2`).
-  
-- **GPMF Binary Telemetry:**
-  Synthetic binary streams with standard KLV blocks (`DEVC`, `STRM`, `GPS5`, `GPSU`, `SCAL`) are created in-memory to test the binary parser and exporters without needing multi-gigabyte video files.
-
-- **FFmpeg Concat & Subprocess Calls:**
-  `subprocess.run` is mocked to verify correct argument assembly (`-f concat -safe 0 -map 0 -c copy`) and error handling without spawning long-running video encode processes.
-
-### Running Tests
-
-Execute the full suite:
 ```bash
-uv run pytest
+git clone https://github.com/StrangeSid/uel-gopro.git
+cd uel-gopro
+uv sync
+uv run pytest -q
+uv run ruff check src tests
+uv run uel-gopro --help
 ```
 
-Run tests with verbose output and coverage:
+---
+
+## Development standards
+
+- Keep changes surgical and scoped to one purpose.
+- Prefer the standard library and existing dependencies over new ones.
+- New code should use modern typing (`list[str]`, `str | None`) and
+  `from __future__ import annotations`. Don't churn existing modules solely to
+  change `Optional[...]` to `... | None`.
+- Give every public function and method type hints and a useful docstring.
+- Cite the protocol source in a comment or docstring whenever code talks to the
+  camera (OpenGoPro HTTP spec, BLE status docs, or the official Python SDK).
+- Never invent a camera endpoint or status ID. If it isn't documented, mark it
+  as experimental and cover it with a test or a clear limitation in the docs.
+- Don't add destructive commands (format, delete-all) without a documented,
+  confirmed API and an explicit confirmation flow.
+
+### Protocol references
+
+- [OpenGoPro HTTP API](https://gopro.github.io/OpenGoPro/http/)
+- [OpenGoPro BLE documentation](https://gopro.github.io/OpenGoPro/docs/ble)
+- [Official Python SDK](https://github.com/gopro/OpenGoPro/tree/main/demos/python/sdk_wireless_camera_control)
+
+When a protocol detail is ambiguous, prefer the official SDK's wire bytes and
+schemas over community guesses.
+
+---
+
+## Testing without physical hardware
+
+The suite runs offline. It mocks the hardware and network layers:
+
+- REST and cloud tests use `httpx.MockTransport` or mocked clients.
+- USB tests feed synthetic `psutil.net_if_addrs()` output.
+- BLE tests use official-SDK packet vectors and a mocked `BleakClient`.
+- GPMF tests build synthetic KLV streams, including real `type_size=4`
+  GPS5/GPS9.
+- MP4 tests build synthetic `ftyp`/`mdat`/`moov` boxes.
+- FFmpeg tests mock `subprocess.run` to check arguments and manifests.
+- MTP tests skip automatically when ImageCaptureCore is unavailable.
+
+Run the suite:
+
 ```bash
+uv run pytest -q
 uv run pytest -v
-```
-
-Run a specific test file:
-```bash
 uv run pytest tests/test_media.py
 ```
 
----
+Lint:
 
-## Architectural Pointers
+```bash
+uv run ruff check src tests
+```
 
-Before making structural modifications, please read the architectural specification:
-
-- **[Architecture Deep-Dive](docs/ARCHITECTURE.md):** Detailed documentation of the 5-layer system:
-  1. Priority-based transport auto-negotiation (USB CDC-ECM -> COHN -> Wi-Fi AP -> BLE).
-  2. The 32-bit integer file size firmware bug and HTTP `HEAD` mitigation.
-  3. Lossless chapter concatenation mechanics via FFmpeg concat demuxer with `gpmd` telemetry preservation.
-  4. GPMF binary KLV parser and coordinate decoding architecture.
-  5. GoPro Labs QR code generation engine with terminal half-block rendering.
+CI runs Python 3.11 through 3.13, Ruff, pytest, and a distribution build. The
+publish workflow runs the same checks and verifies that the release tag matches
+`pyproject.toml`.
 
 ---
 
-## Pull Request Guidelines
+## Architecture pointers
 
-1. **Branch Naming:** Use descriptive branch names:
-   - `feat/cohn-mdns-discovery`
-   - `fix/gpmf-negative-elevation`
-   - `docs/architecture-diagram`
-2. **Commit Messages:** Follow the Conventional Commits specification:
-   - `feat(media): add parallel download worker pool`
-   - `fix(transport): handle cdc-ecm interface disconnection`
-   - `docs(contributing): update testing instructions`
-3. **Verify CI Checks:**
-   - All tests pass: `uv run pytest`.
-   - No untracked artifacts or temporary files are committed.
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing transports,
+GPMF parsing, or media handling. It lists the supported transports (USB
+CDC-ECM, Wi-Fi AP, manual IP, macOS MTP media fallback, explicit BLE) and the
+known limitations (no COHN, no SD format command, approximate GPS timestamps,
+no IMU export).
+
+---
+
+## Pull request guidelines
+
+1. Use descriptive branch names such as `fix/gpmf-gps9-stride`,
+   `feat/webcam-fov`, or `docs/transport-support`.
+2. Follow Conventional Commits, for example:
+   - `fix(media): fall back to ranged GET when HEAD is rejected`
+   - `fix(ble): frame command payloads once`
+   - `docs(readme): document MTP limitations`
+3. Before you open a PR:
+   - `uv run pytest -q` passes.
+   - `uv run ruff check src tests` passes.
+   - `uv build` succeeds and the wheel and sdist include `COPYING`.
+   - Documentation is updated if behavior or limitations change.
+   - No build artifacts, tokens, or local config files are committed.
+
+---
+
+## Release process
+
+1. Update `version` in `pyproject.toml` and `__version__` in
+   `src/uel_gopro/__init__.py` (they must match).
+2. Run the full test suite and `uv build`.
+3. Commit, tag `vX.Y.Z`, and push the tag.
+4. Publish a GitHub release. The `publish.yml` workflow tests, checks the tag
+   against the package version, and publishes to PyPI via trusted publishing.

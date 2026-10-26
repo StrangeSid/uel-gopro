@@ -1,28 +1,37 @@
-# Deep Architectural Audit & Specification: GoPro Software Ecosystem & Unified CLI (`uel-gopro`)
+# GoPro ecosystem audit and `uel-gopro` specification
 
-**Target Project:** `uel-gopro` (Unofficial Extended Life GoPro)  
-**Location:** `/Users/sid/Documents/proj/uel-gopro`  
-**Date:** October 2026  
-**Document Status:** Complete Architecture, Ecosystem Audit & Bug Analysis  
+- Target project: `uel-gopro` (Unofficial Extended Life GoPro)
+- Location: `/Users/sid/Documents/proj/uel-gopro`
+- Date: October 2026
+- Document status: ecosystem and protocol audit
 
----
-
-## 1. Executive Summary & Philosophical Mission
-
-**UEL** stands for **Unofficial Extended Life**. GoPro's software ecosystem is steadily degrading, deprecating open desktop tooling, and moving core features behind paywalls and mobile app enclosures:
-
-1. **Desktop Abandonment:** The official GoPro Quik desktop app has been abandoned or rewritten into an ad-filled subscription gateway for mobile devices, leaving macOS, Linux, and Windows desktop users without official first-class tools.
-2. **Cloud Paywall Lock-in:** Cloud backup, multi-device sync, and full-resolution offloading are pushed behind the GoPro Premium subscription, while the web portal arbitrarily caps manual downloads at 25 items.
-3. **Webcam & Live Stream Neglect:** The official GoPro Webcam utility for macOS/Windows is notoriously unstable, proprietary, and completely unsupported on Linux, with firmware updates regularly breaking webcam endpoints (e.g., HERO13 Black webcam regressions).
-4. **Metadata & Telemetry Siloing:** GPS and IMU telemetry extraction (speedometer, maps, g-force, Gyroflow stabilization) are hidden inside proprietary formats, forcing creators into closed ecosystems.
-5. **Protocol Fragmentation:** Even the official `OpenGoPro` program provides only loose, non-integrated Python/Kotlin demo scripts, leaving users without a cohesive, robust tool.
-
-### The Mission of `uel-gopro` (Unofficial Extended Life)
-`uel-gopro` is an independent, **open-source, local-first CLI toolchain** built to give GoPro hardware an **Unofficial Extended Life** and reclaim full ownership of the camera. It consolidates all reverse-engineered and official interfaces into a single, high-performance terminal utility that never requires cloud subscriptions, proprietary apps, or mobile devices to configure, control, ingest, process, and extract data from GoPro cameras.
+> Scope note (2026-10): This document is a broad audit of the GoPro
+> ecosystem and protocol surface, not a description of the current UEL-GoPro
+> implementation. The implemented feature set and its limitations are
+> documented in [README.md](README.md) and
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In particular, the current
+> CLI does not implement COHN/mDNS, SD-card formatting, IMU export,
+> parallel downloads, or BLE response/ack handling.
 
 ---
 
-## 2. Hardware Generations & Protocol Evolution
+## 1. Summary and mission
+
+UEL stands for Unofficial Extended Life. GoPro has deprecated open desktop tools and moved core features behind paywalls and mobile apps:
+
+1. GoPro abandoned the Quik desktop app or rewrote it as an ad-filled subscription gateway for mobile devices. Desktop users on macOS, Linux, and Windows have no official first-class tools.
+2. GoPro puts cloud backup, multi-device sync, and full-resolution offloading behind the GoPro Premium subscription, and the web portal caps manual downloads at 25 items.
+3. The official GoPro Webcam utility for macOS and Windows is unstable, proprietary, and unsupported on Linux. Firmware updates regularly break webcam endpoints, including HERO13 Black regressions.
+4. GPS and IMU telemetry extraction (speedometer, maps, g-force, Gyroflow stabilization) sits inside proprietary formats. Creators who want that data have to use closed tools.
+5. The official `OpenGoPro` program provides only separate Python and Kotlin demo scripts. Users have no single cohesive tool.
+
+### Mission of `uel-gopro`
+
+`uel-gopro` is an independent, open-source, local-first CLI toolchain. It aims to give GoPro hardware an Unofficial Extended Life and return control of the camera to its owner. It combines the reverse-engineered and official interfaces in one terminal utility that configures, controls, ingests, processes, and extracts data from GoPro cameras without cloud subscriptions, proprietary apps, or mobile devices.
+
+---
+
+## 2. Hardware generations and protocol evolution
 
 | Generation | Supported Transports | API Architecture | Firmware Gotchas & Limitations |
 | :--- | :--- | :--- | :--- |
@@ -38,149 +47,154 @@
 
 ---
 
-## 3. Deep Analysis of Transport Protocols & Firmware Bugs
+## 3. Transport protocols and firmware bugs
 
 ### 3.1. Bluetooth Low Energy (BLE)
-* **Primary Service UUID:** `0000FEA6-0000-1000-8000-00805F9B34FB` (16-bit short form: `0xFEA6`).
-* **Company Identifier:** `0xF202` (GoPro, Inc.).
-* **Key Characteristics:**
-  * **Command Request (`b5f70072-...`):** Write Without Response. Encapsulates control packets (shutter, presets, Wi-Fi AP power on).
-  * **Command Response (`b5f70073-...`):** Notification characteristic emitting status/ack codes.
-  * **Setting Request (`b5f70074-...`):** Modify camera settings (resolution, FPS, FOV).
-  * **Setting Response (`b5f70075-...`):** Notification of setting updates.
-  * **Query Request (`b5f70076-...`):** Register for real-time status/setting updates.
-  * **Query Response (`b5f70077-...`):** Async notification of status flags (battery %, SD space, recording time).
-* **Packet Framing Protocol:**
-  * BLE payloads exceeding MTU (typically 20 or 244 bytes depending on OS negotiation) are split with GoPro framing headers:
-    * Single packet: `0b00` prefix + length (or protobuf payload).
-    * Start of multi-packet: `0b01` prefix.
-    * Continuation: `0b10` prefix + sequence index.
+* Primary service UUID: `0000FEA6-0000-1000-8000-00805F9B34FB` (16-bit short form: `0xFEA6`).
+* Company identifier: `0x02F2` (GoPro, Inc.).
+* Key characteristics:
+  * Command request (`b5f90072-...`): Write Without Response. Encapsulates control packets (shutter, presets, Wi-Fi AP power on).
+  * Command response (`b5f90073-...`): notification characteristic that sends status and ack codes.
+  * Setting request (`b5f90074-...`): changes camera settings (resolution, FPS, FOV).
+  * Setting response (`b5f90075-...`): notifies the host of setting updates.
+  * Query request (`b5f90076-...`): registers for real-time status and setting updates.
+  * Query response (`b5f90077-...`): sends asynchronous notifications of status flags (battery %, SD space, recording time).
+* Packet framing:
+  * GoPro splits BLE payloads that exceed the MTU (typically 20 or 244 bytes, depending on OS negotiation) with a header:
+    * General header: top bits `000` plus a 5-bit length for payloads up to 31 bytes.
+    * Extended 13-bit header: top bits `001` plus a 13-bit length. The official SDK uses this form for writes.
+    * Extended 16-bit header: top bits `010` plus a 16-bit length.
+    * Continuation packet: top bit `1` plus a 4-bit sequence index.
+  * `uel-gopro` writes the command payload (`command ID`, argument length, arguments) once and adds the 13-bit header. For shutter start the wire bytes are `20 03 01 01 01`.
 
-### 3.2. Firmware Bugs & Edge Cases (Documented from OpenGoPro FAQ & Field Audits)
-1. **The 32-bit Integer File Size Overflow Bug:**
-   * In `/gopro/media/list`, the file size field `s` for files > 4GB (common on 4K/5.3K captures) overflows 32-bit unsigned/signed bounds on several firmware builds, reporting corrupted file sizes (e.g. negative numbers or truncated modulo $2^{32}$).
-   * **Workaround for `uel-gopro`:** Never trust `s` in `/gopro/media/list` for downloads. Query HTTP `HEAD /videos/DCIM/100GOPRO/<filename>` or parse `Content-Length` header on the GET request stream.
-2. **Wi-Fi AP Keep-Alive Dropouts:**
-   * Camera AP drops connection silently if no keep-alive is received within 30 seconds.
-   * **Workaround for `uel-gopro`:** Background daemon thread pings `/gopro/camera/keep_alive` or emits BLE keep-alive packet at 15-second intervals.
-3. **HERO13 Black Webcam & mDNS Flaws:**
-   * Traditional `/gopro/webcam/start` fails or hangs on certain HERO13 builds.
-   * mDNS discovery packets are sporadically dropped; direct IP probing of USB subnet (`172.2X.1XX.51`) is drastically more reliable than `.local` hostname resolution.
-4. **CDC-ECM Network Routing Conflict on macOS/Linux:**
-   * Plugging GoPro via USB-C can inadvertently re-route default gateway traffic to the camera's internal DHCP gateway (`172.2X.1XX.1`), severing host internet access.
-   * **Workaround for `uel-gopro`:** Set host interface routing metric so camera interface only routes `172.20.0.0/14` subnet traffic, preserving primary WAN gateway.
+### 3.2. Firmware bugs and edge cases
 
-### 3.3. Wi-Fi COHN (Camera on the Home Network / Station Mode)
-* **Topology:** Camera joins user's existing Wi-Fi LAN / WLAN.
-* **Mechanism:**
-  1. BLE connection provisions SSID and WPA passphrase.
-  2. Camera provisions self-signed TLS certificate and shares fingerprints over BLE.
-  3. Camera pulls DHCP lease on home router (`192.168.x.x`).
-  4. Commands dispatch over HTTPS with TLS validation bypass or imported self-signed cert.
-* **Advantage:** Total freedom from AP tethering; computer stays connected to internet while batch downloading or scripting multi-camera rigs.
+The cases below come from the OpenGoPro FAQ and field audits.
 
-### 3.4. Wired USB-C (CDC-ECM / RNDIS / NCM)
-* **Performance:** Direct IP over USB link gives 30–42 MB/s transfer speeds.
-* **Camera Endpoint:** `http://172.2X.1XX.51:8080/`.
-* **Power:** Continuous charging; enables 24/7 continuous timelapse or monitoring setups.
+1. 32-bit file size overflow in `/gopro/media/list`.
+   * On several firmware builds, the file size field `s` overflows 32-bit signed or unsigned bounds for files over 4GB (common on 4K/5.3K captures) and reports a corrupted size, such as a negative number or a value truncated modulo $2^{32}$.
+   * Workaround for `uel-gopro`: never trust `s` in `/gopro/media/list` for downloads. Query HTTP `HEAD /videos/DCIM/100GOPRO/<filename>`, or use a one-byte ranged GET when the camera rejects `HEAD`.
+2. Wi-Fi AP keep-alive dropouts.
+   * The camera AP drops the connection without warning if it receives no keep-alive within 30 seconds.
+   * Recommended approach: ping `/gopro/camera/keep_alive` during long sessions. The current CLI does not run a daemon for this.
+3. HERO13 Black webcam and mDNS flaws.
+   * The older `/gopro/webcam/start` endpoint fails or hangs on certain HERO13 builds.
+   * mDNS discovery packets are sometimes dropped. Probing the USB subnet directly (`172.2X.1XX.51`) works more reliably than resolving the `.local` hostname.
+4. CDC-ECM network routing conflict on macOS and Linux.
+   * Connecting a GoPro over USB-C can send default-gateway traffic to the camera's internal DHCP gateway (`172.2X.1XX.1`) and cut off the host's internet access.
+   * Recommended host-side workaround: set a route or interface metric so only `172.20.0.0/14` traffic uses the camera interface. This keeps the primary WAN gateway, and the current CLI does not automate it.
+
+### 3.3. Wi-Fi COHN (camera on the home network, station mode)
+* Topology: the camera joins the user's existing Wi-Fi LAN or WLAN.
+* Mechanism:
+  1. The host provisions the SSID and WPA passphrase over BLE.
+  2. The camera creates a self-signed TLS certificate and shares its fingerprints over BLE.
+  3. The camera gets a DHCP lease from the home router (`192.168.x.x`).
+  4. The host sends commands over HTTPS, either bypassing TLS validation or importing the self-signed certificate.
+* Advantage: the camera no longer needs an AP tether, and the computer keeps its internet connection while it batch downloads or scripts multi-camera rigs.
+
+### 3.4. Wired USB-C (CDC-ECM, RNDIS, and NCM)
+* Performance: direct IP over the USB link gives 30 to 42 MB/s.
+* Camera endpoint: `http://172.2X.1XX.51:8080/`.
+* Power: the link charges the camera continuously, so 24/7 timelapse and monitoring setups can run.
 
 ---
 
-## 4. In-Depth Audit of Existing Open-Source Implementations
+## 4. Existing open-source implementations
 
-### 4.1. `gopro/OpenGoPro` (Official Reference)
-* **Repository:** `https://github.com/gopro/OpenGoPro`
-* **Language/Stack:** Python (Bleak, Requests, FastAPI for mocking), Kotlin (KMP), Swift.
-* **Capabilities:**
-  * Authoritative OpenAPI / Protobuf specs for HERO9 through HERO13.
+### 4.1. `gopro/OpenGoPro` (official reference)
+* Repository: `https://github.com/gopro/OpenGoPro`
+* Language and stack: Python (Bleak, Requests, FastAPI for mocking), Kotlin (KMP), Swift.
+* Capabilities:
+  * Authoritative OpenAPI and Protobuf specs for HERO9 through HERO13.
   * BLE discovery, Wi-Fi AP bootstrapping, and COHN provisioning scripts.
-  * Comprehensive endpoint mapping: Shutter, Presets, Settings, Status, Media list, Stream initiation.
-* **Deficiencies & Blindspots:**
-  * **Not a functional CLI utility:** Demos are isolated monolithic scripts (`cohn.py`, `wifi_stream.py`, `photo.py`).
+  * Broad endpoint mapping: shutter, presets, settings, status, media list, and stream initiation.
+* Limitations:
+  * The project has no functional CLI. Its demos are separate scripts (`cohn.py`, `wifi_stream.py`, `photo.py`).
   * No chapter concatenation or media assembly.
   * No telemetry extraction or format conversion.
-  * Heavy dependency footprint (`bleak`, `protobuf`, `pydantic`, `rich`).
-  * Zero backward compatibility with pre-HERO9 cameras.
+  * Large dependency footprint (`bleak`, `protobuf`, `pydantic`, `rich`).
+  * No backward compatibility with pre-HERO9 cameras.
 
 ### 4.2. `fxstein/GoProX`
-* **Repository:** `https://github.com/fxstein/GoProX`
-* **Language/Stack:** Shell (Bash/Zsh), Homebrew tap, `launchd` service agent.
-* **Capabilities:**
-  * Automated detection of mounted GoPro SD cards / volumes on macOS.
-  * **Smart Chapter Joining:** Seamlessly stitches 4GB segmented chapters (`GX010001.MP4`, `GX020001.MP4`) into a single file without re-encoding using `ffmpeg` stream copying.
-  * **Metadata & EXIF Preservation:** Corrects file modification and creation timestamps using GPMF metadata to prevent NLE timeline scrambling.
-  * Checksum verification (SHA-256) before SD card purge.
-* **Deficiencies & Blindspots:**
-  * Strictly macOS-dependent (`launchd`, macOS filesystem mount assumptions).
-  * No camera control, BLE, Wi-Fi, or live streaming capabilities.
-  * Cannot interface with camera over MTP or network sockets directly (relies on mounted mass storage volumes).
+* Repository: `https://github.com/fxstein/GoProX`
+* Language and stack: shell (Bash/Zsh), a Homebrew tap, and a `launchd` service agent.
+* Capabilities:
+  * Detects mounted GoPro SD cards and volumes on macOS.
+  * Chapter joining: stitches segmented 4GB chapters (`GX010001.MP4`, `GX020001.MP4`) into one file without re-encoding, using `ffmpeg` stream copy.
+  * Metadata and EXIF preservation: corrects file modification and creation timestamps from GPMF metadata to keep NLE timelines in order.
+  * Verifies SHA-256 checksums before it purges the SD card.
+* Limitations:
+  * macOS-only (`launchd` and macOS filesystem mount assumptions).
+  * No camera control, BLE, Wi-Fi, or live streaming.
+  * Can't talk to the camera over MTP or network sockets directly; it relies on mounted mass storage volumes.
 
 ### 4.3. `omokage-code/GPTransfer`
-* **Repository:** `https://github.com/omokage-code/GPTransfer`
-* **Language/Stack:** Swift, macOS AppKit / SwiftUI.
-* **Capabilities:**
-  * Direct USB connection transfer via macOS ImageCapture / MTP protocol.
-  * Prevents OS-level kernel panics and transfer aborts on 4GB+ GoPro MP4s.
-  * Safe staging architecture: downloads files to `.partial` buffers, validates byte size, and atomically moves to final destination.
-  * Ingests sidecar files (`.WAV`, `.GPR`, `.THM`, `.LRV`).
-* **Deficiencies & Blindspots:**
-  * GUI only; no CLI flags or scriptable automation.
-  * macOS only.
+* Repository: `https://github.com/omokage-code/GPTransfer`
+* Language and stack: Swift, macOS AppKit and SwiftUI.
+* Capabilities:
+  * Transfers over a direct USB connection through macOS ImageCapture and MTP.
+  * Prevents OS-level kernel panics and transfer aborts on 4GB and larger GoPro MP4s.
+  * Staging: downloads to `.partial` buffers, validates the byte size, and moves the file to its final destination atomically.
+  * Also ingests sidecar files (`.WAV`, `.GPR`, `.THM`, `.LRV`).
+* Limitations:
+  * It has a GUI only and no CLI flags or scriptable automation.
+  * It runs only on macOS.
   * No camera control, telemetry parsing, or cloud syncing.
 
 ### 4.4. `itsankoff/gopro-plus`
-* **Repository:** `https://github.com/itsankoff/gopro-plus`
-* **Language/Stack:** Python, Docker.
-* **Capabilities:**
-  * Interacts directly with GoPro Cloud (Plus subscription) REST backend.
-  * Bypasses the 25-file bulk download ceiling imposed by the official web portal.
-  * Paged queries to `https://api.gopro.com/media` with original high-bitrate media and sidecar downloads.
-  * Headless Dockerized container ideal for Synology/Unraid NAS automated backups.
-* **Deficiencies & Blindspots:**
-  * Authentication requires manual extraction of `AUTH_TOKEN` and `USER_ID` from web browser developer tools (cookies).
-  * Cloud-only; zero local hardware interaction.
+* Repository: `https://github.com/itsankoff/gopro-plus`
+* Language and stack: Python, Docker.
+* Capabilities:
+  * Talks directly to the GoPro Cloud REST backend for Plus subscriptions.
+  * Bypasses the 25-file bulk download ceiling on the official web portal.
+  * Sends paged queries to `https://api.gopro.com/media` and downloads original high-bitrate media and sidecars.
+  * Runs as a headless Docker container for automated backups on Synology or Unraid NAS.
+* Limitations:
+  * Authentication requires manual extraction of `AUTH_TOKEN` and `USER_ID` from browser developer tools (cookies).
+  * It works only with the cloud and has no local hardware interaction.
   * No chapter stitching or telemetry parsing on downloaded assets.
 
-### 4.5. `KonradIT/gopro-py-api` & `goprowifihack`
-* **Repository:** `https://github.com/KonradIT/gopro-py-api`
-* **Language/Stack:** Python.
-* **Capabilities:**
-  * Extensive documentation and wrapper methods for HERO3 through HERO8 cameras.
-  * Live preview UDP streaming pipeline (`udp://10.5.5.9:8554`).
-* **Deficiencies & Blindspots:**
-  * Legacy code structure; inconsistent error handling across firmware variants.
-  * Lacks support for modern Protobuf BLE commands and COHN.
+### 4.5. `KonradIT/gopro-py-api` and `goprowifihack`
+* Repository: `https://github.com/KonradIT/gopro-py-api`
+* Language and stack: Python.
+* Capabilities:
+  * Covers HERO3 through HERO8 with extensive documentation and wrapper methods.
+  * Provides a live preview UDP stream (`udp://10.5.5.9:8554`).
+* Limitations:
+  * Legacy code structure and inconsistent error handling across firmware variants.
+  * No support for modern Protobuf BLE commands or COHN.
 
-### 4.6. Telemetry & Sensors: `gopro/gpmf-parser` & `JuanIrache/gopro-telemetry`
-* **Repository:** `https://github.com/gopro/gpmf-parser` (C) & `https://github.com/JuanIrache/gopro-telemetry` (Node.js)
-* **Capabilities:**
-  * GoPro embeds a separate telemetry track (`gpmd` track) in MP4 containers.
-  * Streams parsed:
-    * `GPS5`: Latitude, longitude, altitude, 2D speed, 3D speed (sampled at 18 Hz).
-    * `ACCL`: 3-axis accelerometer (sampled at ~200 Hz).
-    * `GYRO`: 3-axis gyroscope (sampled at ~200–400 Hz for Gyroflow stabilization).
-    * `SHUT`, `ISOG`: Optical exposure parameters.
-    * `CORI`: Camera orientation quaternions.
-    * `GRAV`: Gravity vectors.
-* **Deficiencies & Blindspots:**
-  * Exists as raw libraries without end-to-end command-line pipelines for video creators.
+### 4.6. Telemetry and sensors: `gopro/gpmf-parser` and `JuanIrache/gopro-telemetry`
+* Repository: `https://github.com/gopro/gpmf-parser` (C) and `https://github.com/JuanIrache/gopro-telemetry` (Node.js).
+* Capabilities:
+  * GoPro embeds a separate telemetry track (the `gpmd` track) in MP4 containers.
+  * The tools parse these streams:
+    * `GPS5`: latitude, longitude, altitude, 2D speed, 3D speed (sampled at 18 Hz).
+    * `ACCL`: 3-axis accelerometer (sampled at about 200 Hz).
+    * `GYRO`: 3-axis gyroscope (sampled at about 200 to 400 Hz for Gyroflow stabilization).
+    * `SHUT`, `ISOG`: optical exposure parameters.
+    * `CORI`: camera orientation quaternions.
+    * `GRAV`: gravity vectors.
+* Limitations:
+  * These are raw libraries with no end-to-end command-line pipeline for video creators.
 
-### 4.7. GoPro Labs Firmware: `gopro/labs`
-* **Architecture:** Custom firmware overlays running on HERO7 through HERO13.
-* **Mechanism:** Optical QR code scanner parses encoded text strings when camera lens views the code.
-* **Capabilities:**
+### 4.7. GoPro Labs firmware: `gopro/labs`
+* Architecture: custom firmware overlays that run on HERO7 through HERO13.
+* Mechanism: an optical QR scanner reads encoded text when the camera lens points at the code.
+* Capabilities:
   * Motion detection capture triggers (`!M...`).
-  * Speed / GPS geofence triggers (`!S...`).
-  * Bitrate boosts up to 180–200 Mbps (`*BITR=...`).
-  * Scheduled wake/sleep timers.
-  * Custom on-screen burn-in text / overlays.
-* **CLI Potential:** Terminal CLI can generate instant ASCII / ANSI QR codes directly in the terminal window, enabling zero-connection camera programming.
+  * Speed and GPS geofence triggers (`!S...`).
+  * Bitrate boosts in the 180 to 200 Mbps range (`*BITR=...`).
+  * Scheduled wake and sleep timers.
+  * Custom on-screen burn-in text and overlays.
+* CLI potential: a terminal CLI can generate ASCII or ANSI QR codes directly in the terminal window, so the user can program the camera without a connection.
 
 ---
 
-## 5. Architectural Blueprint for `uel-gopro`
+## 5. Planned architecture for `uel-gopro` (not current behavior)
 
-### 5.1. Core Command Hierarchy
+### 5.1. Core command hierarchy
 
 ```
 uel-gopro
@@ -216,14 +230,14 @@ uel-gopro
 └── cloud                        # GoPro Plus Cloud synchronization
     ├── auth                     # Save session tokens securely
     ├── list                     # Browse cloud media assets
-    └── sync                     # Headless multi-threaded mirror to local NAS directory
+    └── sync                     # Headless mirror to local NAS directory (planned)
 ```
 
 ---
 
-## 6. Transport Selection & Auto-Negotiation Strategy
+## 6. Transport selection and auto-negotiation
 
-`uel-gopro` will implement a priority-based **Auto-Negotiation Transport Layer**:
+The long-term design uses a priority order for transport selection. The current code does not implement that layer, and its resolver checks manual IP, then USB, then Wi-Fi AP. The diagram below shows the longer-term priority, not the current resolver:
 
 ```
                  +---------------------------+
@@ -255,48 +269,52 @@ uel-gopro
                           [Connect Host Wi-Fi] (Ultra low power)
 ```
 
-1. **Tier 1 (Wired USB-C):** Default if cable connected. Highest bandwidth (40 MB/s), instant response, zero Wi-Fi hopping.
-2. **Tier 2 (Wi-Fi COHN):** If wireless and camera provisioned on local LAN. Allows control and media download without breaking PC internet.
-3. **Tier 3 (Wi-Fi AP):** If camera remote and large file download/streaming required. BLE triggers camera AP; host Wi-Fi negotiates link.
-4. **Tier 4 (Pure BLE):** For status polling, shutter trigger, and quick setting changes when bandwidth is not required. Saves battery.
+1. Tier 1 (wired USB-C): the default when a cable is connected. Highest bandwidth (40 MB/s), instant response, no Wi-Fi hopping.
+2. Tier 2 (Wi-Fi COHN): used when the camera is wireless and provisioned on the local LAN. It allows control and media download without breaking the PC's internet connection.
+3. Tier 3 (Wi-Fi AP): used when the camera is remote and a large download or stream is required. BLE starts the camera AP, and the host Wi-Fi connects to it.
+4. Tier 4 (pure BLE): used for status polling, shutter triggers, and quick setting changes when bandwidth isn't required. It saves battery.
 
 ---
 
-## 7. Media Processing & Ingest Pipeline Specifications
+## 7. Media processing and ingest pipeline
 
-### 7.1. Chapter Stitching Specification
-* **Problem:** Files split at 4,294,967,296 bytes (4GB FAT32 legacy boundary). A 45-minute 4K clip generates `GX010042.MP4`, `GX020042.MP4`, `GX030042.MP4`.
-* **Standard Concat Bug:** Naive `ffmpeg -f concat` strips GPMF telemetry track or causes audio/video desync due to non-zero starting DTS timestamps on subsequent chapters.
-* **`uel-gopro` Stitching Engine:**
-  1. Inspect MP4 container tracks (`ffprobe -show_streams`).
-  2. Map Track 0 (Video), Track 1 (Audio), Track 2 (Timecode/Spatial Audio), and Track 3 (`gpmd` telemetry).
-  3. Generate dynamic FFmpeg concat filter or call `MP4Box -cat` to perform lossless stream copying:
-     ```bash
-     ffmpeg -f concat -safe 0 -i chapter_list.txt -map 0:v -map 0:a -map 0:m:handler_name:"GoPro MET" -c copy output.mp4
-     ```
-  4. Verify byte count and check that overall duration equals the sum of chapters.
+### 7.1. Chapter stitching
+* Problem: files split at 4,294,967,296 bytes (the 4GB FAT32 legacy boundary). A 45-minute 4K clip generates `GX010042.MP4`, `GX020042.MP4`, and `GX030042.MP4`.
+* Standard concat bug: a naive `ffmpeg -f concat` strips the GPMF telemetry track or causes audio/video desync because subsequent chapters start with non-zero DTS timestamps.
+* Current `uel-gopro` implementation:
+  1. Group chapter files by GoPro base ID.
+  2. Write an FFmpeg concat manifest.
+  3. Run `ffmpeg -y -nostdin -f concat -safe 0 -i manifest -map 0 -c copy`.
+  4. Write to a temporary output file, verify it is non-empty, then rename it.
+  5. Restore the first chapter's capture timestamp when the MP4 exposes one.
 
-### 7.2. High-Speed Download Engine
-* Direct HTTP GET to `http://<ip>:8080/videos/DCIM/100GOPRO/<filename>`.
-* Support `Range: bytes=X-Y` headers to spawn multi-threaded chunked downloads across USB/Wi-Fi.
-* Staging strategy: write to `.download.part` file; atomic rename upon full SHA-256 / size verification.
+  There's no `ffprobe` preflight or duration verification yet. A future
+  improvement could map tracks explicitly and verify the sum of durations.
 
----
-
-## 8. GoPro Labs QR Generator Specification
-
-`uel-gopro labs qr` will directly render QR codes into terminal standard output using Unicode block elements (`▀`, `▄`, `█`) or truecolor ANSI escapes.
-
-**Supported Macro Presets:**
-* **Max Bitrate:** `*BITR=180` (Boosts 4K/5.3K recording bitrate).
-* **Motion Detection:** `!M1` (Begins recording only when optical motion detected; pauses when still).
-* **Speed Trigger:** `!S50` (Starts recording once GPS speed exceeds 50 km/h).
-* **Scheduled Capture:** `!08:00N` (Wake and record at 08:00 AM).
-* **Custom Overlay:** `oT%m/%d/%y %H:%M:%S` (Burn real-time timestamp into video feed).
+### 7.2. Download engine (current implementation)
+* Direct HTTP GET to `http://<ip>:8080/videos/DCIM/<directory>/<filename>`.
+* Authoritative size lookup with `HEAD`, and a one-byte ranged-GET fallback when
+  `HEAD` is rejected. This avoids trusting the 32-bit size in `/gopro/media/list`.
+* Resumable downloads use `Range: bytes=N-`, a `.partial` file, and an atomic
+  rename after size verification.
+* Downloads are sequential, not multi-threaded. There's no SHA-256 digest yet.
 
 ---
 
-## 9. Technology Stack Recommendation for Implementation
+## 8. GoPro Labs QR generator
+
+`uel-gopro labs qr` renders QR codes to standard output with Unicode block elements (`▀`, `▄`, `█`) or truecolor ANSI escapes.
+
+Supported macro presets:
+* Max bitrate: `*BITR=180` (boosts 4K/5.3K recording bitrate).
+* Motion detection: `!M1` (starts recording when it detects optical motion, pauses when the scene is still).
+* Speed trigger: `!S50` (starts recording once GPS speed exceeds 50 km/h).
+* Scheduled capture: `!08:00N` (wakes and records at 08:00 AM).
+* Custom overlay: `oT%m/%d/%y %H:%M:%S` (burns a real-time timestamp into the video feed).
+
+---
+
+## 9. Technology stack recommendation
 
 | Consideration | Python (Click / Typer + Bleak) | Go (Cobra + TinyGo BLE) | Rust (Clap + Btleplug) |
 | :--- | :--- | :--- | :--- |
@@ -306,13 +324,13 @@ uel-gopro
 | **Media Concat / FFmpeg**| Subprocess to `ffmpeg` or `av` bindings. | Subprocess to `ffmpeg`. | Subprocess or static `ffmpeg-sys`. |
 | **Concurrency (Download)**| Asyncio / ThreadPool. | Native Goroutines (excellent). | Tokio async runtime (excellent). |
 
-### Recommended Phased Architecture
-* **Core Language:** Python 3.11+ using `Typer` / `Rich` for rapid feature completeness, leveraging `bleak` for BLE, `httpx` for HTTP/2 multi-stream downloads, and Protobuf schema bindings.
-* **Packaging:** Standalone binaries compiled via `PyInstaller` or `Nuitka` to distribute zero-dependency executables (`uel-gopro`) via Homebrew and direct GitHub releases.
+### Recommended architecture
+* Core language: Python 3.11+ with `Typer` and `Rich`, `bleak` for BLE, `httpx` for HTTP/2 multi-stream downloads, and Protobuf schema bindings.
+* Packaging: build standalone binaries with `PyInstaller` or `Nuitka` and distribute zero-dependency executables (`uel-gopro`) through Homebrew and GitHub releases.
 
 ---
 
-## 10. Execution Roadmap
+## 10. Execution roadmap
 
 ```
 [Phase 1: Foundation & USB Control]
