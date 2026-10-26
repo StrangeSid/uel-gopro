@@ -3,10 +3,11 @@ class UelGopro < Formula
 
   desc "Unofficial Extended Life GoPro CLI toolchain"
   homepage "https://github.com/StrangeSid/uel-gopro"
-  url "https://github.com/StrangeSid/uel-gopro/archive/refs/tags/v0.1.0.tar.gz"
   license "GPL-3.0-or-later"
   head "https://github.com/StrangeSid/uel-gopro.git", branch: "main"
 
+  # There is no stable Homebrew release yet. Install with:
+  #   brew install --HEAD ./Formula/uel-gopro.rb
   depends_on "python@3.13"
   depends_on "ffmpeg"
 

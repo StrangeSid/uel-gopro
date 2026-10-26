@@ -14,6 +14,15 @@ BIN_NAME="uel-gopro"
 INSTALL_DIR="${BINDIR:-$HOME/.local/bin}"
 SHARE_DIR="$HOME/.local/share/uel-gopro"
 
+# Install from the current main branch until a fixed release is published.
+# Falls back to the last PyPI release when git is unavailable.
+if command -v git >/dev/null 2>&1; then
+    PACKAGE_SPEC="uel-gopro @ git+https://github.com/${REPO}.git@main"
+else
+    PACKAGE_SPEC="uel-gopro"
+    echo -e "${YELLOW}Warning: git not found; installing the last PyPI release.${NC}"
+fi
+
 # Terminal Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -74,11 +83,18 @@ INSTALLED=0
 # Method A: Use 'uv' if available (fastest and cleanest tool manager)
 if command -v uv >/dev/null 2>&1; then
     echo -e "${BLUE}==>${NC} Found ${BOLD}uv${NC}. Installing via uv tool..."
-    uv tool install --force uel-gopro
-    if [ -f "$HOME/.local/bin/$BIN_NAME" ] && [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then
-        ln -sf "$HOME/.local/bin/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+    if uv tool install --force "$PACKAGE_SPEC"; then
+        UV_BIN="$(command -v "$BIN_NAME" 2>/dev/null || true)"
+        if [ -z "$UV_BIN" ] && [ -x "$HOME/.local/bin/$BIN_NAME" ]; then
+            UV_BIN="$HOME/.local/bin/$BIN_NAME"
+        fi
+        if [ -n "$UV_BIN" ] && [ ! -e "$INSTALL_DIR/$BIN_NAME" ]; then
+            ln -sf "$UV_BIN" "$INSTALL_DIR/$BIN_NAME"
+        fi
+        INSTALLED=1
+    else
+        echo -e "${YELLOW}uv installation failed; trying an isolated Python environment.${NC}"
     fi
-    INSTALLED=1
 fi
 
 # Method B: Isolated Python Virtual Environment in ~/.local/share/uel-gopro
@@ -102,7 +118,7 @@ if [ "$INSTALLED" -eq 0 ]; then
         mkdir -p "$SHARE_DIR"
         "$PYTHON_CMD" -m venv "$SHARE_DIR/venv"
         "$SHARE_DIR/venv/bin/pip" install --quiet --upgrade pip
-        "$SHARE_DIR/venv/bin/pip" install --quiet --upgrade uel-gopro
+        "$SHARE_DIR/venv/bin/pip" install --quiet --upgrade "$PACKAGE_SPEC"
         ln -sf "$SHARE_DIR/venv/bin/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
         INSTALLED=1
     fi
@@ -111,6 +127,12 @@ fi
 if [ "$INSTALLED" -eq 0 ]; then
     echo -e "${RED}Error: Neither 'uv' nor Python >= 3.11 could be found.${NC}" >&2
     echo -e "Please install Python 3.11+ or uv, then rerun this script." >&2
+    exit 1
+fi
+
+if [ ! -x "$INSTALL_DIR/$BIN_NAME" ]; then
+    echo -e "${RED}Error: installation completed but ${INSTALL_DIR}/${BIN_NAME} is missing.${NC}" >&2
+    echo -e "Check the output above and ensure '${BIN_NAME}' is installed." >&2
     exit 1
 fi
 

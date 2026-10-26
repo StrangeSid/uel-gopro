@@ -1,16 +1,17 @@
 [project]
 name = "uel-gopro"
-version = "0.1.0"
+version = "0.1.1"
 description = "Unofficial Extended Life GoPro CLI toolchain"
 readme = "README.md"
 license = "GPL-3.0-or-later"
+license-files = ["COPYING"]
 authors = [
     { name = "StrangeSid", email = "140191922+StrangeSid@users.noreply.github.com" }
 ]
 requires-python = ">=3.11"
 keywords = ["gopro", "action-camera", "open-gopro", "telemetry", "gpmf", "cli", "mtp"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: MacOS",
@@ -32,6 +33,12 @@ dependencies = [
     "typer>=0.12.0",
 ]
 
+# MTP support on macOS uses ImageCaptureCore/Foundation through PyObjC.
+# bleak already pulls Cocoa in on macOS, but declare it explicitly so the
+# optional backend cannot silently disappear.
+[project.optional-dependencies]
+mtp = ["pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'"]
+
 [project.urls]
 Homepage = "https://github.com/StrangeSid/uel-gopro"
 Repository = "https://github.com/StrangeSid/uel-gopro"
@@ -41,7 +48,7 @@ Issues = "https://github.com/StrangeSid/uel-gopro/issues"
 uel-gopro = "uel_gopro.cli.main:main"
 
 [build-system]
-requires = ["uv_build>=0.12.19,<0.13.0"]
+requires = ["uv_build>=0.12.19,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -50,4 +57,16 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-mock>=3.17.0",
+    "ruff>=0.6.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

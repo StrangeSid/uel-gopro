@@ -6,8 +6,45 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    name: Test before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Verify a tagged release matches the package version
+        if: github.event_name == 'release'
+        run: |
+          python - <<'PY'
+          import os, tomllib
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          assert tag == version, f"tag {tag!r} != project version {version!r}"
+          print(f"Tag and version agree: {version}")
+          PY
+
   pypi-publish:
     name: Build and publish Python distribution to PyPI
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: publish-sid
