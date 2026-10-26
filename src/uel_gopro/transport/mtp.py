@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 from uel_gopro.core.exceptions import MediaError, TransportError
 from uel_gopro.core.models import CameraInfo, MediaItem, MediaType, TransportType
@@ -18,7 +16,7 @@ HAS_IMAGECAPTURE = False
 if sys.platform == "darwin":
     try:
         import objc
-        from Foundation import NSDate, NSDictionary, NSObject, NSRunLoop, NSURL
+        from Foundation import NSDate, NSObject, NSRunLoop, NSURL
         objc.loadBundle(
             "ImageCaptureCore",
             globals(),
@@ -102,7 +100,10 @@ class MtpClient:
             return self._cam
 
         self._browser_del = _BrowserDelegate.alloc().init()
-        self._browser = ICDeviceBrowser.alloc().init()
+        browser_class = globals().get("ICDeviceBrowser")
+        if browser_class is None:
+            raise TransportError("ImageCaptureCore ICDeviceBrowser is unavailable")
+        self._browser = browser_class.alloc().init()
         self._browser.setDelegate_(self._browser_del)
         self._browser.setBrowsedDeviceTypeMask_(0xFFFFFFFF)
         self._browser.start()
@@ -196,10 +197,14 @@ class MtpClient:
         self,
         filename: str,
         dest_dir: Path | str,
-        timeout_sec: float = 60.0,
+        timeout_sec: float = 3600.0,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Path:
         """Downloads a specific file from GoPro via MTP."""
+        safe_filename = Path(filename).name
+        if safe_filename in ("", ".", ".."):
+            raise MediaError(f"Refusing unsafe media filename: {filename!r}")
+
         cam = self._get_camera()
         if cam is None:
             raise TransportError("No GoPro detected over MTP.")
@@ -217,12 +222,12 @@ class MtpClient:
 
         dest_path = Path(dest_dir).expanduser().resolve()
         dest_path.mkdir(parents=True, exist_ok=True)
-        final_file = dest_path / filename
+        final_file = dest_path / safe_filename
 
         dl_delegate = _DownloadDelegate.alloc().init()
         options = {
             "ICDownloadsDirectoryURL": NSURL.fileURLWithPath_(str(dest_path)),
-            "ICSaveAsFilename": filename,
+            "ICSaveAsFilename": safe_filename,
             "ICOverwrite": True,
         }
 
@@ -240,16 +245,41 @@ class MtpClient:
             NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.2))
             if dl_delegate.finished:
                 if dl_delegate.error:
-                    raise MediaError(f"MTP Download failed for {filename}: {dl_delegate.error}")
+                    raise MediaError(f"MTP download failed for {filename}: {dl_delegate.error}")
                 break
 
+        if not dl_delegate.finished:
+            raise MediaError(
+                f"MTP download timed out after {timeout_sec:.0f}s for {filename}. "
+                "The file may still be transferring; retry before removing the camera."
+            )
+
         if not final_file.exists():
-            raise MediaError(f"Download timed out or file missing on disk: {final_file}")
+            raise MediaError(f"MTP download finished but the file is missing on disk: {final_file}")
+
+        try:
+            expected_size = int(target.fileSize() or 0)
+        except Exception:
+            expected_size = 0
+        actual_size = final_file.stat().st_size
+        if expected_size > 0 and actual_size != expected_size:
+            raise MediaError(
+                f"MTP download size mismatch for {filename}: "
+                f"expected {expected_size} bytes, got {actual_size}"
+            )
+        if progress_callback:
+            progress_callback(actual_size, expected_size or actual_size)
 
         return final_file
 
-    def close(self):
-        """Closes session and stops browser."""
+    def __enter__(self) -> "MtpClient":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the session and stop the device browser."""
         if self._cam is not None:
             try:
                 self._cam.requestCloseSession()

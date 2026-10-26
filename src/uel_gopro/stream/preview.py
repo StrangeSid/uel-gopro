@@ -14,7 +14,7 @@ DEFAULT_STREAM_URL = "udp://@0.0.0.0:8554"
 
 
 def build_player_command(player: str = "mpv", stream_url: str = DEFAULT_STREAM_URL) -> List[str]:
-    """Generates optimal low-latency playback command arguments for mpv or ffplay."""
+    """Generate low-latency playback arguments for mpv or ffplay."""
     if player == "mpv":
         return [
             "mpv",
@@ -24,7 +24,7 @@ def build_player_command(player: str = "mpv", stream_url: str = DEFAULT_STREAM_U
             "--fps=30",
             stream_url,
         ]
-    elif player == "ffplay":
+    if player == "ffplay":
         return [
             "ffplay",
             "-fflags",
@@ -36,8 +36,7 @@ def build_player_command(player: str = "mpv", stream_url: str = DEFAULT_STREAM_U
             "experimental",
             stream_url,
         ]
-    else:
-        return [player, stream_url]
+    return [player, stream_url]
 
 
 def launch_preview_stream(
@@ -46,15 +45,19 @@ def launch_preview_stream(
     stream_url: str = DEFAULT_STREAM_URL,
     spawn_player: bool = True,
 ) -> Optional[subprocess.Popen]:
-    """Starts camera stream and optionally launches external video player."""
-    # Trigger wired USB control / stream start
+    """Start the camera preview stream and optionally launch an external player.
+
+    The preview stream is a best-effort operation: some camera/firmware
+    combinations reject the wired-USB control endpoint while still allowing
+    the stream to start.
+    """
     try:
-        client._get("/gopro/camera/control/wired_usb", params={"p": 1})
+        client.enable_wired_usb(True)
     except Exception as exc:
-        logger.warning(f"Could not enable wired_usb control: {exc}")
+        logger.warning(f"Could not enable wired USB control: {exc}")
 
     try:
-        client._get("/gopro/camera/stream/start")
+        client.start_preview_stream()
     except Exception as exc:
         logger.warning(f"Stream start endpoint returned: {exc}")
 
@@ -68,8 +71,14 @@ def launch_preview_stream(
         elif shutil.which("ffplay"):
             selected_player = "ffplay"
         else:
-            raise CommandError("Neither 'mpv' nor 'ffplay' found in system PATH. Install one or pass --no-player.")
+            raise CommandError(
+                "Neither 'mpv' nor 'ffplay' found in PATH. "
+                "Install one or rerun with --no-player."
+            )
 
     cmd = build_player_command(player=selected_player, stream_url=stream_url)
     logger.info(f"Spawning player: {' '.join(cmd)}")
-    return subprocess.Popen(cmd)
+    try:
+        return subprocess.Popen(cmd)
+    except FileNotFoundError as exc:
+        raise CommandError(f"Could not launch player '{selected_player}': {exc}") from exc

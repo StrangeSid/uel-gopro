@@ -154,7 +154,12 @@ def stitch_chapters(
         resolved_files.append(p)
 
     out_p = Path(output_path).resolve()
+    if not out_p.suffix:
+        raise StitchError(
+            f"Output path must include a file extension (for example .mp4): {out_p}"
+        )
     out_p.parent.mkdir(parents=True, exist_ok=True)
+    temp_out = out_p.with_name(f"{out_p.stem}.partial{out_p.suffix}")
 
     manifest_fd, manifest_path = tempfile.mkstemp(prefix="gopro_concat_", suffix=".txt")
     try:
@@ -167,6 +172,7 @@ def stitch_chapters(
         cmd = [
             ffmpeg_path,
             "-y",
+            "-nostdin",
             "-f",
             "concat",
             "-safe",
@@ -177,7 +183,7 @@ def stitch_chapters(
             "0",
             "-c",
             "copy",
-            str(out_p),
+            str(temp_out),
         ]
 
         logger.debug(f"Running stitch command: {' '.join(cmd)}")
@@ -189,23 +195,29 @@ def stitch_chapters(
                 stderr=subprocess.PIPE,
                 text=True,
             )
-        except FileNotFoundError as e:
+        except FileNotFoundError as exc:
             raise StitchError(
                 f"FFmpeg binary not found at '{ffmpeg_path}'. Ensure FFmpeg is installed."
-            ) from e
-        except OSError as e:
-            raise StitchError(f"Failed to execute FFmpeg: {e}") from e
+            ) from exc
+        except OSError as exc:
+            raise StitchError(f"Failed to execute FFmpeg: {exc}") from exc
 
         if result.returncode != 0:
             err_msg = result.stderr.strip() or result.stdout.strip()
             raise StitchError(f"FFmpeg failed with exit code {result.returncode}:\n{err_msg}")
 
-        if not out_p.exists() or out_p.stat().st_size == 0:
-            raise StitchError(f"Stitched output file was not created or is empty: {out_p}")
+        if not temp_out.exists() or temp_out.stat().st_size == 0:
+            raise StitchError(f"Stitched output file was not created or is empty: {temp_out}")
 
+        temp_out.replace(out_p)
         return out_p
 
     finally:
+        if temp_out.exists():
+            try:
+                temp_out.unlink()
+            except OSError:
+                pass
         if os.path.exists(manifest_path):
             try:
                 os.unlink(manifest_path)

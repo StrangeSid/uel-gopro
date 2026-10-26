@@ -4,7 +4,6 @@ import csv
 import json
 import struct
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 from pathlib import Path
 import pytest
 import segno
@@ -19,7 +18,6 @@ from uel_gopro.labs.qr import (
 from uel_gopro.telemetry.gpmf import (
     extract_gpmf_from_mp4,
     parse_gpmf_stream,
-    unpack_klv_stream,
 )
 from uel_gopro.telemetry.exporters import (
     export_csv,
@@ -61,15 +59,15 @@ class TestLabsQR:
         assert len(output) > 0
         # Check for block characters
         assert any(c in output for c in ("█", "▀", "▄", " "))
-        # Check for ANSI escape sequences
-        assert "\033[97;40m" in output
+        # Standard polarity: black modules on white background
+        assert "\033[30;47m" in output
         assert "\033[0m" in output
 
     def test_render_terminal_qr_invert(self):
         output = render_terminal_qr("!M1", invert=True)
         assert isinstance(output, str)
         assert len(output) > 0
-        assert "\033[30;47m" in output
+        assert "\033[97;40m" in output
         assert "\033[0m" in output
 
     @pytest.mark.parametrize("preset_name", list(PRESETS.keys()))
@@ -154,6 +152,78 @@ class TestGPMFParsing:
         assert abs(pt2.alt - 13.0) < 1e-3
         assert abs(pt2.speed_2d - 6.0) < 1e-3
         assert abs(pt2.speed_3d - 6.1) < 1e-3
+
+    def test_parse_realistic_gps5_type_size_four(self):
+        """Real GPMF uses type_size=4 for GPS5; repeat is 5 * sample_count."""
+        scal_bytes = struct.pack(">5i", 10_000_000, 10_000_000, 1_000, 100, 100)
+        scal_klv = make_klv("SCAL", "l", 4, 5, scal_bytes)
+        gps5_bytes = struct.pack(
+            ">10i",
+            377749290, -1224194000, 12500, 540, 550,
+            377750000, -1224190000, 13000, 600, 610,
+        )
+        gps5_klv = make_klv("GPS5", "l", 4, 10, gps5_bytes)
+        strm_payload = scal_klv + gps5_klv
+        strm_klv = make_klv("STRM", "", 1, len(strm_payload), strm_payload)
+
+        track = parse_gpmf_stream(strm_klv)
+        assert len(track.gps_points) == 2
+        assert track.gps_points[0].lat == pytest.approx(37.774929, abs=1e-6)
+        assert track.gps_points[1].alt == pytest.approx(13.0, abs=1e-3)
+
+    def test_parse_gps9_stride_is_nine_even_for_five_samples(self):
+        """GPS9 carries 9 values per sample; 5 samples = 45 values."""
+        scal = [10_000_000, 10_000_000, 1_000, 100, 100, 1, 1_000, 1, 1]
+        scal_klv = make_klv("SCAL", "l", 4, 9, struct.pack(">9i", *scal))
+
+        samples = []
+        for index in range(5):
+            samples.extend(
+                [
+                    377749290 + index,
+                    -1224194000 - index,
+                    12500 + index,
+                    540,
+                    550,
+                    8415,
+                    43200 + index,
+                    0,
+                    1,
+                ]
+            )
+        gps9_klv = make_klv("GPS9", "l", 4, 45, struct.pack(">45i", *samples))
+        strm_payload = scal_klv + gps9_klv
+        strm_klv = make_klv("STRM", "", 1, len(strm_payload), strm_payload)
+
+        track = parse_gpmf_stream(strm_klv)
+        assert len(track.gps_points) == 5
+        assert track.gps_points[0].lat == pytest.approx(37.774929, abs=1e-7)
+        assert track.gps_points[0].timestamp_utc is not None
+        assert "2023-01-15" in track.gps_points[0].timestamp_utc
+        # The fifth sample must not be swallowed by a 5-value stride.
+        assert track.gps_points[4].lat == pytest.approx(37.7749294, abs=1e-7)
+
+    def test_gpsu_timestamps_accumulate_across_klvs(self):
+        scal_klv = make_klv(
+            "SCAL", "l", 4, 5, struct.pack(">5i", 10_000_000, 10_000_000, 1_000, 100, 100)
+        )
+        gpsu_bytes = b"230501143000.000"
+        gpsu_klv = make_klv("GPSU", "U", 1, len(gpsu_bytes), gpsu_bytes)
+        gps5_one = make_klv(
+            "GPS5", "l", 4, 5, struct.pack(">5i", 377749290, -1224194000, 12500, 540, 550)
+        )
+        gps5_two = make_klv(
+            "GPS5", "l", 4, 5, struct.pack(">5i", 377749291, -1224194001, 12501, 541, 551)
+        )
+        strm_payload = gpsu_klv + scal_klv + gps5_one + gps5_two
+        strm_klv = make_klv("STRM", "", 1, len(strm_payload), strm_payload)
+
+        track = parse_gpmf_stream(strm_klv)
+        assert len(track.gps_points) == 2
+        first = track.gps_points[0].timestamp_utc
+        second = track.gps_points[1].timestamp_utc
+        assert first is not None and second is not None
+        assert first != second
 
     def test_parse_gpmf_stream_with_days_and_secs(self):
         # GPS sample with 7 fields: lat, lon, alt, s2d, s3d, days, secs
@@ -317,6 +387,17 @@ class TestExporters:
         assert len(coords) == 2
         assert coords[0] == [-122.4194, 37.7749, 10.5]
         assert coords[1] == [-122.419, 37.775, 11.0]
+        assert data["bbox"] == [-122.4194, 37.7749, 10.5, -122.419, 37.775, 11.0]
+
+    def test_export_geojson_single_point(self, tmp_path: Path):
+        track = TelemetryTrack(
+            device_name="GoPro",
+            gps_points=[GpsPoint(lat=1.0, lon=2.0, alt=3.0)],
+        )
+        out = export_geojson(track, tmp_path / "single.geojson")
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["features"][0]["geometry"] == {"type": "Point", "coordinates": [2.0, 1.0, 3.0]}
+        assert data["bbox"] == [2.0, 1.0, 3.0, 2.0, 1.0, 3.0]
 
     def test_export_csv(self, sample_track: TelemetryTrack, tmp_path: Path):
         csv_file = tmp_path / "track.csv"

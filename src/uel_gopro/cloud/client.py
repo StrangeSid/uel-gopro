@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
+
 import httpx
 
 from uel_gopro.core.exceptions import CommandError, MediaError, TransportError
@@ -14,20 +16,34 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "uel-gopro" / "cloud.json"
 BASE_URL = "https://api.gopro.com/media"
 
 
+def _safe_filename(value: Any, fallback: str) -> str:
+    """Return a path-component-safe filename, never ``.``/``..``."""
+    name = Path(str(value or "")).name.strip()
+    if name in ("", ".", ".."):
+        safe_fallback = Path(str(fallback or "media")).name
+        return safe_fallback if safe_fallback not in ("", ".", "..") else "media"
+    return name
+
+
 def save_cloud_auth(
     token: str,
     user_id: str = "",
     config_path: Optional[Path | str] = None,
 ) -> Path:
-    """Save GoPro Cloud authentication token and user ID to config file."""
+    """Save GoPro Cloud authentication token and user ID to a private config file."""
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = {
         "auth_token": token,
         "user_id": user_id,
     }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:  # pragma: no cover - best effort on non-POSIX filesystems
+        pass
+    tmp_path.replace(path)
     logger.info(f"GoPro Cloud credentials saved to {path}")
     return path
 
@@ -38,18 +54,20 @@ def load_cloud_auth(config_path: Optional[Path | str] = None) -> dict[str, str]:
     if not path.is_file():
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
-            return {}
-    except Exception as exc:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
         logger.warning(f"Error reading cloud auth config from {path}: {exc}")
         return {}
 
 
 class GoProCloudClient:
-    """GoPro Plus Cloud API client for media listing and batch sync downloads."""
+    """GoPro Plus Cloud API client for media listing and batch sync downloads.
+
+    This uses GoPro's undocumented media API with a user-supplied bearer
+    token.  It is inherently best-effort and may break when GoPro changes the
+    service.
+    """
 
     def __init__(
         self,
@@ -61,6 +79,8 @@ class GoProCloudClient:
     ):
         creds = load_cloud_auth(config_path) if (auth_token is None or user_id is None) else {}
         self.auth_token = auth_token if auth_token is not None else creds.get("auth_token", "")
+        # Stored for compatibility with existing config files; the current
+        # undocumented API calls are authenticated with the bearer token only.
         self.user_id = user_id if user_id is not None else creds.get("user_id", "")
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout_sec
@@ -76,13 +96,10 @@ class GoProCloudClient:
         }
 
     def list_media(self, page: int = 1, per_page: int = 100) -> list[dict[str, Any]]:
-        """Query media library page using GoPro Cloud search endpoint, bypassing 25-file limit."""
+        """Query one page of the GoPro Cloud media library."""
         url = f"{self.base_url}/search"
         headers = self._get_headers()
-        params = {
-            "page": page,
-            "per_page": per_page,
-        }
+        params = {"page": page, "per_page": per_page}
 
         try:
             with httpx.Client(timeout=self.timeout) as client:
@@ -91,12 +108,15 @@ class GoProCloudClient:
                     raise CommandError(
                         f"GoPro Cloud search failed with HTTP {resp.status_code}: {resp.text}"
                     )
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError as exc:
+                    raise CommandError(f"Invalid JSON from GoPro Cloud API: {exc}") from exc
                 if isinstance(data, dict):
                     embedded = data.get("_embedded", {})
-                    if "media" in embedded and isinstance(embedded["media"], list):
+                    if isinstance(embedded, dict) and isinstance(embedded.get("media"), list):
                         return embedded["media"]
-                    if "media" in data and isinstance(data["media"], list):
+                    if isinstance(data.get("media"), list):
                         return data["media"]
                 elif isinstance(data, list):
                     return data
@@ -117,16 +137,19 @@ class GoProCloudClient:
                         f"Download endpoint for {media_id} returned HTTP {resp.status_code}"
                     )
                     return None
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError as exc:
+                    raise CommandError(f"Invalid JSON from GoPro Cloud API: {exc}") from exc
                 if isinstance(data, dict):
                     embedded = data.get("_embedded", {})
-                    variations = embedded.get("variations", [])
-                    for var in variations:
-                        if var.get("label") == "source" and "url" in var:
-                            return var["url"]
+                    variations = embedded.get("variations", []) if isinstance(embedded, dict) else []
+                    for variation in variations:
+                        if variation.get("label") == "source" and "url" in variation:
+                            return variation["url"]
                     if variations and "url" in variations[0]:
                         return variations[0]["url"]
-                    files = embedded.get("files", [])
+                    files = embedded.get("files", []) if isinstance(embedded, dict) else []
                     if files and "url" in files[0]:
                         return files[0]["url"]
                     if "url" in data:
@@ -144,52 +167,80 @@ class GoProCloudClient:
         progress_callback: Optional[Callable[[int, int], None]] = None,
         chunk_size: int = 65536,
     ) -> Path:
-        """Downloads a media file to target_path using a .partial buffer."""
+        """Download a media file, resuming from an existing ``.partial`` buffer."""
         target = Path(target_path).resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
         partial_path = target.with_name(f"{target.name}.partial")
 
-        headers = {}
+        headers: dict[str, str] = {}
         if "gopro.com" in url and self.auth_token:
-            auth_token = self.auth_token
-            headers["Authorization"] = (
-                auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
-            )
+            token = self.auth_token
+            headers["Authorization"] = token if token.startswith("Bearer ") else f"Bearer {token}"
+
+        if expected_size is not None and expected_size <= 0:
+            expected_size = None
+        existing = partial_path.stat().st_size if partial_path.exists() else 0
+        if expected_size is not None and existing > expected_size:
+            partial_path.unlink(missing_ok=True)
+            existing = 0
+        if expected_size is not None and existing == expected_size and partial_path.exists():
+            partial_path.replace(target)
+            return target
+
+        if existing > 0:
+            headers["Range"] = f"bytes={existing}-"
 
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 with client.stream("GET", url, headers=headers, follow_redirects=True) as resp:
-                    resp.raise_for_status()
-                    total = expected_size or 0
-                    if total == 0 and "content-length" in resp.headers:
-                        cl = resp.headers["content-length"]
-                        if cl.isdigit():
-                            total = int(cl)
+                    if resp.status_code == 206:
+                        mode = "ab"
+                        downloaded = existing
+                    elif resp.status_code == 200:
+                        if existing > 0:
+                            logger.info("Server did not honor Range; restarting cloud download from byte 0")
+                        mode = "wb"
+                        downloaded = 0
+                    elif resp.status_code == 416:
+                        partial_path.unlink(missing_ok=True)
+                        where = "Range Not Satisfiable; partial buffer removed"
+                        raise MediaError(f"Cloud download failed for {url}: {where}")
+                    else:
+                        resp.raise_for_status()
+                        mode = "wb"
+                        downloaded = 0
 
-                    downloaded = 0
-                    with open(partial_path, "wb") as f:
+                    if expected_size is None:
+                        content_length = resp.headers.get("content-length")
+                        if content_length and content_length.isdigit() and resp.status_code == 200:
+                            expected_size = int(content_length)
+
+                    with open(partial_path, mode) as f:
                         for chunk in resp.iter_bytes(chunk_size=chunk_size):
                             f.write(chunk)
                             downloaded += len(chunk)
                             if progress_callback:
-                                progress_callback(downloaded, total)
+                                progress_callback(downloaded, expected_size or 0)
 
-            if expected_size is not None and downloaded != expected_size:
+            if expected_size is not None and expected_size > 0 and downloaded != expected_size:
+                partial_path.unlink(missing_ok=True)
                 raise MediaError(
                     f"Downloaded size ({downloaded}) does not match expected size ({expected_size})"
                 )
 
             partial_path.replace(target)
             return target
-        except Exception as exc:
-            if partial_path.exists():
-                try:
-                    partial_path.unlink()
-                except OSError:
-                    pass
-            if isinstance(exc, (MediaError, TransportError, CommandError)):
-                raise
-            raise MediaError(f"Error downloading {url} to {target_path}: {exc}") from exc
+
+        except MediaError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            raise MediaError(
+                f"HTTP {exc.response.status_code} error downloading {url}: {exc}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise MediaError(f"Network error downloading {url} to {target_path}: {exc}") from exc
+        except OSError as exc:
+            raise MediaError(f"Filesystem error downloading {url} to {target_path}: {exc}") from exc
 
     def sync_all(
         self,
@@ -197,14 +248,17 @@ class GoProCloudClient:
         progress_callback: Optional[Callable[[int, int], None]] = None,
         max_pages: Optional[int] = None,
     ) -> list[Path]:
-        """Iterates media pages and downloads all media files to dest_dir.
+        """Iterate cloud pages and download all media files to ``dest_dir``.
 
-        Skips already downloaded files if size matches. Uses .partial buffer during download.
+        Existing files with a matching size are skipped.  A partial buffer is
+        retained on network failure so the next run can resume it.
         """
         dest = Path(dest_dir).resolve()
         dest.mkdir(parents=True, exist_ok=True)
 
         downloaded_paths: list[Path] = []
+        seen_ids: set[str] = set()
+        previous_page_ids: set[str] = set()
         page = 1
         per_page = 100
 
@@ -213,8 +267,21 @@ class GoProCloudClient:
             if not items:
                 break
 
+            page_ids = {str(item.get("id")) for item in items if item.get("id") is not None}
+            if page > 1 and page_ids and page_ids == previous_page_ids:
+                logger.warning("Cloud API returned the same page twice; stopping pagination")
+                break
+            previous_page_ids = page_ids
+
             for item in items:
-                filename = item.get("filename") or f"{item.get('id', 'media')}.mp4"
+                asset_id = str(item.get("id") or "").strip()
+                if asset_id and asset_id in seen_ids:
+                    continue
+                if asset_id:
+                    seen_ids.add(asset_id)
+
+                fallback = f"{asset_id or 'media'}.mp4"
+                filename = _safe_filename(item.get("filename"), fallback)
                 target_path = dest / filename
 
                 raw_size = item.get("file_size")
@@ -224,32 +291,29 @@ class GoProCloudClient:
                 if raw_size is not None:
                     try:
                         expected_size = int(raw_size)
+                        if expected_size <= 0:
+                            expected_size = None
                     except (ValueError, TypeError):
                         expected_size = None
 
-                # Check if already completely downloaded
                 if target_path.exists():
                     actual_size = target_path.stat().st_size
-                    if expected_size is not None and actual_size == expected_size:
-                        logger.info(
-                            f"Skipping {filename}: already exists with matching size ({actual_size} bytes)"
-                        )
-                        downloaded_paths.append(target_path)
-                        continue
-                    elif expected_size is None and actual_size > 0:
+                    if (expected_size is not None and actual_size == expected_size) or (
+                        expected_size is None and actual_size > 0
+                    ):
                         logger.info(f"Skipping {filename}: already exists ({actual_size} bytes)")
                         downloaded_paths.append(target_path)
                         continue
+                    if expected_size is not None and asset_id:
+                        # Do not overwrite a different asset that happens to share a filename.
+                        target_path = dest / f"{asset_id}_{filename}"
 
-                # Determine download URL
                 download_url = item.get("download_url") or item.get("url")
                 if not download_url and item.get("id"):
-                    download_url = self.get_download_url(item["id"])
+                    download_url = self.get_download_url(str(item["id"]))
 
                 if not download_url:
-                    logger.warning(
-                        f"Could not resolve download URL for item {item.get('id', filename)}"
-                    )
+                    logger.warning(f"Could not resolve download URL for item {asset_id or filename}")
                     continue
 
                 saved_path = self.download_media_file(

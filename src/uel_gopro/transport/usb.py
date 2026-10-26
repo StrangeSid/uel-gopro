@@ -6,7 +6,6 @@ from typing import Optional
 import httpx
 import psutil
 
-from uel_gopro.core.exceptions import CameraNotFoundError, TransportError
 from uel_gopro.core.models import CameraInfo, TransportType
 
 logger = logging.getLogger(__name__)

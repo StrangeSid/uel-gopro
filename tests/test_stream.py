@@ -1,9 +1,11 @@
 from unittest.mock import MagicMock
+
 import pytest
 
 from uel_gopro.api.rest import GoProRestClient
+from uel_gopro.core.exceptions import CommandError
 from uel_gopro.stream.preview import build_player_command, launch_preview_stream
-from uel_gopro.stream.webcam import start_webcam, stop_webcam, get_webcam_status
+from uel_gopro.stream.webcam import get_webcam_status, start_webcam, stop_webcam
 
 
 def test_build_player_command():
@@ -21,18 +23,44 @@ def test_launch_preview_stream_no_player():
     client = MagicMock(spec=GoProRestClient)
     proc = launch_preview_stream(client, spawn_player=False)
     assert proc is None
-    assert client._get.call_count == 2
+    client.enable_wired_usb.assert_called_once_with(True)
+    client.start_preview_stream.assert_called_once()
 
 
-def test_webcam_start_and_stop():
+@pytest.mark.parametrize(
+    "resolution,expected_code",
+    [("1080p", 12), ("720p", 7), ("480p", 4)],
+)
+def test_webcam_resolution_codes(resolution, expected_code):
     client = MagicMock(spec=GoProRestClient)
-    client._get.return_value = {"status": 0}
+    client.start_webcam.return_value = {"status": 0}
+    start_webcam(client, resolution=resolution, fov="linear")
+    client.start_webcam.assert_called_once_with(expected_code, 4)
 
-    res_start = start_webcam(client, resolution="1080p", fov="linear")
-    assert res_start == {"status": 0}
 
-    res_stop = stop_webcam(client)
-    assert res_stop == {"status": 0}
+@pytest.mark.parametrize(
+    "fov,expected_code",
+    [("wide", 0), ("narrow", 2), ("superview", 3), ("linear", 4)],
+)
+def test_webcam_fov_codes(fov, expected_code):
+    client = MagicMock(spec=GoProRestClient)
+    client.start_webcam.return_value = {"status": 0}
+    start_webcam(client, resolution="1080p", fov=fov)
+    client.start_webcam.assert_called_once_with(12, expected_code)
 
-    res_stat = get_webcam_status(client)
-    assert res_stat == {"status": 0}
+
+def test_webcam_rejects_invalid_options():
+    client = MagicMock(spec=GoProRestClient)
+    with pytest.raises(CommandError, match="Unsupported webcam resolution"):
+        start_webcam(client, resolution="4k")
+    with pytest.raises(CommandError, match="Unsupported webcam field of view"):
+        start_webcam(client, fov="fisheye")
+
+
+def test_webcam_stop_and_status():
+    client = MagicMock(spec=GoProRestClient)
+    client.stop_webcam.return_value = {"status": 0}
+    client.get_webcam_status.return_value = {"status": 1}
+
+    assert stop_webcam(client) == {"status": 0}
+    assert get_webcam_status(client) == {"status": 1}

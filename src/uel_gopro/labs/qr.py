@@ -42,8 +42,8 @@ def render_terminal_qr(code: str, invert: bool = False) -> str:
     - Color polarity is reversed.
     """
     qr = generate_labs_qr(code)
-    # border=2 modules for quiet zone
-    matrix = [list(row) for row in qr.matrix_iter(border=2)]
+    # 4-module quiet zone, as required by the QR specification.
+    matrix = [list(row) for row in qr.matrix_iter(border=4)]
     
     h = len(matrix)
     w = len(matrix[0]) if h > 0 else 0
@@ -56,7 +56,9 @@ def render_terminal_qr(code: str, invert: bool = False) -> str:
         h += 1
 
     lines = []
-    ansi_prefix = "\033[30;47m" if invert else "\033[97;40m"
+    # Default: black modules on a white background (standard polarity).
+    # --invert: white modules on a black background.
+    ansi_prefix = "\033[97;40m" if invert else "\033[30;47m"
     ansi_reset = "\033[0m"
 
     for r in range(0, h, 2):
@@ -66,17 +68,7 @@ def render_terminal_qr(code: str, invert: bool = False) -> str:
             bot = matrix[r + 1][c]
 
             if not invert:
-                # 0 is light (white block), 1 is dark (black space)
-                if top == 0 and bot == 0:
-                    row_chars.append("█")
-                elif top == 0 and bot == 1:
-                    row_chars.append("▀")
-                elif top == 1 and bot == 0:
-                    row_chars.append("▄")
-                else:  # top == 1 and bot == 1
-                    row_chars.append(" ")
-            else:
-                # Inverted: 1 is dark (foreground block), 0 is light (space)
+                # Standard polarity: 1 is dark (foreground block), 0 is light (space)
                 if top == 1 and bot == 1:
                     row_chars.append("█")
                 elif top == 1 and bot == 0:
@@ -84,6 +76,16 @@ def render_terminal_qr(code: str, invert: bool = False) -> str:
                 elif top == 0 and bot == 1:
                     row_chars.append("▄")
                 else:  # top == 0 and bot == 0
+                    row_chars.append(" ")
+            else:
+                # Inverted: 0 is light (foreground block), 1 is dark (space)
+                if top == 0 and bot == 0:
+                    row_chars.append("█")
+                elif top == 0 and bot == 1:
+                    row_chars.append("▀")
+                elif top == 1 and bot == 0:
+                    row_chars.append("▄")
+                else:  # top == 1 and bot == 1
                     row_chars.append(" ")
 
         lines.append(f"{ansi_prefix}{''.join(row_chars)}{ansi_reset}")

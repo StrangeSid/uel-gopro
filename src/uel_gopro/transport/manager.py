@@ -17,28 +17,31 @@ DEFAULT_PORT = 8080
 def resolve_camera(
     target_ip: Optional[str] = None,
     transport_hint: TransportType = TransportType.AUTO,
-    timeout_sec: float = 1.0,
+    timeout_sec: float = 2.0,
 ) -> tuple[CameraInfo, GoProRestClient]:
-    """Resolves and connects to a GoPro camera using prioritized transport fallback.
+    """Resolve a camera over the transports this project actually supports.
 
     Priority:
-    1. Explicit target_ip if provided.
-    2. Wired USB-C (CDC-ECM subnet 172.2X.1XX.51:8080).
-    3. Wi-Fi AP (10.5.5.9:8080).
+    1. Explicit ``target_ip`` (plain HTTP on port 8080).
+    2. Wired USB-C CDC-ECM (``172.2X.1XX.51:8080``), unless Wi-Fi was forced.
+    3. Wi-Fi access point (``10.5.5.9:8080``).
+
+    MTP is handled explicitly by the CLI for media-list/download fallback;
+    COHN and BLE are not part of automatic transport negotiation yet.
     """
-    # 1. Manual IP passed
     if target_ip:
         if probe_camera_ip(target_ip, port=DEFAULT_PORT, timeout_sec=timeout_sec):
-            info = CameraInfo(
-                model_name="GoPro (Manual IP / COHN)",
-                ip_address=target_ip,
-                port=DEFAULT_PORT,
-                transport=TransportType.COHN if transport_hint == TransportType.COHN else TransportType.AUTO,
+            return (
+                CameraInfo(
+                    model_name="GoPro (manual IP)",
+                    ip_address=target_ip,
+                    port=DEFAULT_PORT,
+                    transport=TransportType.MANUAL,
+                ),
+                GoProRestClient(ip=target_ip, port=DEFAULT_PORT),
             )
-            return info, GoProRestClient(ip=target_ip, port=DEFAULT_PORT)
         raise CameraNotFoundError(f"No GoPro response at specified IP: {target_ip}:{DEFAULT_PORT}")
 
-    # 2. Wired USB CDC-ECM (unless user explicitly forced wifi)
     if transport_hint in (TransportType.AUTO, TransportType.USB):
         cam = detect_usb_camera(timeout_sec=timeout_sec)
         if cam:
@@ -46,20 +49,21 @@ def resolve_camera(
         if transport_hint == TransportType.USB:
             raise CameraNotFoundError(
                 "No GoPro detected over USB-C CDC-ECM.\n"
-                "Ensure camera is powered ON, USB connection mode is set to 'GoPro Connect' (not MTP), "
-                "and cable supports data."
+                "Ensure the camera is powered ON, the USB connection mode is "
+                "'GoPro Connect' (not MTP), and the cable supports data."
             )
 
-    # 3. Wi-Fi AP default IP (10.5.5.9)
     if transport_hint in (TransportType.AUTO, TransportType.WIFI_AP):
         if probe_camera_ip(DEFAULT_WIFI_IP, port=DEFAULT_PORT, timeout_sec=timeout_sec):
-            info = CameraInfo(
-                model_name="GoPro (Wi-Fi AP)",
-                ip_address=DEFAULT_WIFI_IP,
-                port=DEFAULT_PORT,
-                transport=TransportType.WIFI_AP,
+            return (
+                CameraInfo(
+                    model_name="GoPro (Wi-Fi AP)",
+                    ip_address=DEFAULT_WIFI_IP,
+                    port=DEFAULT_PORT,
+                    transport=TransportType.WIFI_AP,
+                ),
+                GoProRestClient(ip=DEFAULT_WIFI_IP, port=DEFAULT_PORT),
             )
-            return info, GoProRestClient(ip=DEFAULT_WIFI_IP, port=DEFAULT_PORT)
         if transport_hint == TransportType.WIFI_AP:
             raise CameraNotFoundError(
                 f"No GoPro response on Wi-Fi AP ({DEFAULT_WIFI_IP}:{DEFAULT_PORT}).\n"
@@ -68,6 +72,6 @@ def resolve_camera(
 
     raise CameraNotFoundError(
         "Could not detect any GoPro camera.\n"
-        "Connect via USB-C (GoPro Connect mode) or connect computer Wi-Fi to camera AP (10.5.5.9),\n"
-        "or specify IP explicitly with --ip <ip>."
+        "Connect via USB-C (GoPro Connect mode) or join the camera Wi-Fi AP (10.5.5.9),\n"
+        "or specify an address explicitly with --ip <ip>."
     )

@@ -1,7 +1,6 @@
 import json
-from pathlib import Path
+import stat
 from unittest.mock import MagicMock
-import httpx
 import pytest
 
 from uel_gopro.cloud.client import (
@@ -21,6 +20,8 @@ def test_save_and_load_cloud_auth(tmp_path):
     with open(config_file) as f:
         data = json.load(f)
     assert data == {"auth_token": "test-token-123", "user_id": "user-456"}
+    if hasattr(stat, "S_IMODE"):
+        assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
 
     loaded = load_cloud_auth(config_path=config_file)
     assert loaded == {"auth_token": "test-token-123", "user_id": "user-456"}
@@ -181,8 +182,9 @@ def test_sync_all_downloads_and_skips_existing(tmp_path, monkeypatch):
     stream_call_count = 0
 
     class MockStreamResponse:
-        def __init__(self, content):
+        def __init__(self, content, status_code=200):
             self.content = content
+            self.status_code = status_code
             self.headers = {"content-length": str(len(content))}
 
         def raise_for_status(self):
@@ -243,10 +245,56 @@ def test_sync_all_downloads_and_skips_existing(tmp_path, monkeypatch):
     assert stream_call_count == 0  # No network streams opened!
 
 
+def test_download_media_file_resumes_partial(tmp_path, monkeypatch):
+    client = GoProCloudClient(auth_token="test-token-999")
+    target = tmp_path / "RESUME.MP4"
+    partial = target.with_name("RESUME.MP4.partial")
+    partial.write_bytes(b"12345")
+    seen_range = {}
+
+    class MockStreamResponse:
+        status_code = 206
+        headers = {"content-length": "5"}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size=65536):
+            yield b"67890"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class MockHttpxClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def stream(self, method, url, headers=None, follow_redirects=True):
+            seen_range["range"] = (headers or {}).get("Range")
+            return MockStreamResponse()
+
+    monkeypatch.setattr("httpx.Client", MockHttpxClient)
+    out = client.download_media_file("https://cdn.example.com/resume.mp4", target, expected_size=10)
+    assert out == target
+    assert target.read_bytes() == b"1234567890"
+    assert seen_range["range"] == "bytes=5-"
+    assert not partial.exists()
+
+
 def test_download_media_file_size_mismatch(tmp_path, monkeypatch):
     client = GoProCloudClient(auth_token="test-token-999")
 
     class MockStreamResponse:
+        status_code = 200
         headers = {"content-length": "5"}
 
         def raise_for_status(self):

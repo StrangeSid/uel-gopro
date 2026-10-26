@@ -1,23 +1,28 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any
+from typing import Any, Dict
 
 from uel_gopro.api.rest import GoProRestClient
 from uel_gopro.core.exceptions import CommandError
 
 logger = logging.getLogger(__name__)
 
-# GoPro Webcam Resolution Codes
-WEBCAM_RES_1080P = 12
-WEBCAM_RES_770P = 7
-WEBCAM_RES_720P = 4
+# OpenGoPro webcam resolution codes.
+# Source: https://gopro.github.io/OpenGoPro/http#tag/Webcam
+WEBCAM_RESOLUTIONS = {
+    "480p": 4,
+    "720p": 7,
+    "1080p": 12,
+}
 
-# Webcam FOV Codes
-WEBCAM_FOV_WIDE = 0
-WEBCAM_FOV_LINEAR = 4
-WEBCAM_FOV_NARROW = 6
-WEBCAM_FOV_SUPERVIEW = 3
+# OpenGoPro webcam field-of-view codes.
+WEBCAM_FOVS = {
+    "wide": 0,
+    "narrow": 2,
+    "superview": 3,
+    "linear": 4,
+}
 
 
 def start_webcam(
@@ -25,30 +30,38 @@ def start_webcam(
     resolution: str = "1080p",
     fov: str = "wide",
 ) -> Dict[str, Any]:
-    """Initiates USB webcam mode on the GoPro."""
-    res_code = WEBCAM_RES_1080P if resolution == "1080p" else WEBCAM_RES_720P
-    fov_code = WEBCAM_FOV_LINEAR if fov == "linear" else WEBCAM_FOV_WIDE
+    """Initiate USB webcam mode on the GoPro."""
+    resolution_code = WEBCAM_RESOLUTIONS.get(resolution.lower())
+    if resolution_code is None:
+        raise CommandError(
+            f"Unsupported webcam resolution: {resolution!r}. "
+            f"Choose one of: {', '.join(WEBCAM_RESOLUTIONS)}"
+        )
 
-    # Ensure wired USB is activated
+    fov_code = WEBCAM_FOVS.get(fov.lower())
+    if fov_code is None:
+        raise CommandError(
+            f"Unsupported webcam field of view: {fov!r}. "
+            f"Choose one of: {', '.join(WEBCAM_FOVS)}"
+        )
+
     try:
-        client._get("/gopro/camera/control/wired_usb", params={"p": 1})
-    except Exception:
-        pass
+        client.enable_wired_usb(True)
+    except Exception as exc:  # webcam can still work if this endpoint is unavailable
+        logger.warning(f"Could not enable wired USB control: {exc}")
 
-    # Start webcam endpoint
-    # OpenGoPro v2 endpoint: /gopro/webcam/start?res=X&fov=Y
-    res = client._get("/gopro/webcam/start", params={"res": res_code, "fov": fov_code})
+    result = client.start_webcam(resolution_code, fov_code)
     logger.info(f"GoPro webcam started with resolution={resolution}, fov={fov}")
-    return res
+    return result
 
 
 def stop_webcam(client: GoProRestClient) -> Dict[str, Any]:
-    """Stops USB webcam mode on the GoPro."""
-    res = client._get("/gopro/webcam/stop")
+    """Stop USB webcam mode on the GoPro."""
+    result = client.stop_webcam()
     logger.info("GoPro webcam stopped")
-    return res
+    return result
 
 
 def get_webcam_status(client: GoProRestClient) -> Dict[str, Any]:
-    """Queries current webcam status from the camera."""
-    return client._get("/gopro/webcam/status")
+    """Query the current webcam status from the camera."""
+    return client.get_webcam_status()

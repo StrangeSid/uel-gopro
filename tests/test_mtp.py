@@ -1,7 +1,8 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from pathlib import Path
 import pytest
 
+from uel_gopro.core.exceptions import MediaError
 from uel_gopro.transport.mtp import MtpClient, is_mtp_available
 
 
@@ -60,6 +61,7 @@ def test_mtp_download_file_mock(tmp_path: Path, monkeypatch):
     client = MtpClient()
     mock_file = MagicMock()
     mock_file.name.return_value = "GX010042.MP4"
+    mock_file.fileSize.return_value = 16
 
     mock_cam = MagicMock()
     mock_cam.mediaFiles.return_value = [mock_file]
@@ -78,3 +80,27 @@ def test_mtp_download_file_mock(tmp_path: Path, monkeypatch):
     assert out.exists()
     assert out.name == "GX010042.MP4"
     assert out.read_bytes() == b"dummy video data"
+
+def test_mtp_download_size_mismatch_raises(tmp_path: Path, monkeypatch):
+    if not is_mtp_available():
+        pytest.skip("ImageCaptureCore not available on this platform")
+
+    client = MtpClient()
+    mock_file = MagicMock()
+    mock_file.name.return_value = "GX010042.MP4"
+    mock_file.fileSize.return_value = 100
+
+    mock_cam = MagicMock()
+    mock_cam.mediaFiles.return_value = [mock_file]
+
+    def mock_download(target, options, delegate, selector, ctx):
+        (tmp_path / "GX010042.MP4").write_bytes(b"partial")
+        delegate.finished = True
+        delegate.error = None
+
+    mock_cam.requestDownloadFile_options_downloadDelegate_didDownloadSelector_contextInfo_ = mock_download
+    monkeypatch.setattr(client, "_get_camera", lambda timeout_sec=2.0: mock_cam)
+    monkeypatch.setattr(client, "_open_session", lambda timeout_sec=4.0: True)
+
+    with pytest.raises(MediaError, match="size mismatch"):
+        client.download_file("GX010042.MP4", dest_dir=tmp_path)

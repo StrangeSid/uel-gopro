@@ -153,7 +153,10 @@ def extract_creation_time_ffprobe(
         if ct_str:
             # Typically ISO format: "2026-10-23T14:30:00.000000Z"
             clean_str = ct_str.replace("Z", "+00:00")
-            return datetime.fromisoformat(clean_str)
+            parsed = datetime.fromisoformat(clean_str)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
     except Exception as e:
         logger.debug(f"ffprobe extraction failed for {path}: {e}")
 

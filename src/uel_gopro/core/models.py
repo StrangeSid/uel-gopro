@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from enum import Enum
-from pathlib import Path
 from typing import Any, List, Optional
+from urllib.parse import quote
+
 from pydantic import BaseModel, Field
 
 
 class TransportType(str, Enum):
     USB = "usb"
     MTP = "mtp"
-    COHN = "cohn"
     WIFI_AP = "wifi_ap"
+    MANUAL = "manual"
     BLE = "ble"
     AUTO = "auto"
 
@@ -28,19 +29,17 @@ class CameraInfo(BaseModel):
 class CameraStatus(BaseModel):
     connected: bool = True
     battery_percent: Optional[int] = None
+    battery_bars: Optional[int] = None
     is_charging: bool = False
     is_recording: bool = False
     encoding_active: bool = False
     system_hot: bool = False
-    sd_status: str = "OK"  # OK, MISSING, FULL, ERROR
+    sd_status: str = "UNKNOWN"  # OK, FULL, MISSING, FORMAT_ERROR, BUSY, SWAPPED, UNKNOWN
     sd_remaining_mb: Optional[int] = None
     sd_remaining_video_time_sec: Optional[int] = None
     sd_remaining_photos: Optional[int] = None
-    current_mode: str = "Video"
+    current_mode: str = "Unknown"
     current_preset: Optional[str] = None
-    resolution: Optional[str] = None
-    fps: Optional[str] = None
-    fov: Optional[str] = None
     raw_status: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -64,16 +63,9 @@ class MediaItem(BaseModel):
 
     @property
     def download_url_path(self) -> str:
-        return f"/videos/DCIM/{self.directory}/{self.filename}"
-
-
-class ChapterGroup(BaseModel):
-    base_id: str
-    items: List[MediaItem] = Field(default_factory=list)
-
-    @property
-    def total_bytes(self) -> int:
-        return sum(item.size_bytes for item in self.items)
+        directory = quote(self.directory, safe="")
+        filename = quote(self.filename, safe="")
+        return f"/videos/DCIM/{directory}/{filename}"
 
 
 class GpsPoint(BaseModel):

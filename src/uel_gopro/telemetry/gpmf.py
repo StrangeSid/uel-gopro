@@ -5,18 +5,24 @@ import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 
+from uel_gopro.core.exceptions import TelemetryError
 from uel_gopro.core.models import GpsPoint, TelemetryTrack
 
 logger = logging.getLogger(__name__)
+
+# GoPro's GPS streams are sampled at approximately 18 Hz.  The sample index
+# is used only when a stream does not carry its own days/seconds fields.
+GPS_NOMINAL_HZ = 18.0
 
 
 @dataclass
 class KLV:
     """Represents a single GPMF Key-Length-Value packet."""
+
     fourcc: str
     type_char: bytes
     type_size: int
@@ -27,18 +33,16 @@ class KLV:
 
 
 def _parse_gpsu(val: str) -> Optional[datetime]:
-    """Parse GPSU timestamp string into UTC datetime."""
+    """Parse a GPSU timestamp string into a UTC datetime."""
     val = val.strip().strip("\x00")
     if not val:
         return None
 
-    # Try ISO format
     try:
         return datetime.fromisoformat(val.replace("Z", "+00:00"))
     except Exception:
         pass
 
-    # Try YYMMDDHHMMSS.sss format (GoPro GPSU standard)
     try:
         if "." in val:
             base, frac = val.split(".", 1)
@@ -48,7 +52,7 @@ def _parse_gpsu(val: str) -> Optional[datetime]:
             dt = datetime.strptime(base, "%y%m%d%H%M%S").replace(tzinfo=timezone.utc)
             micro = int(float(f"0.{frac}") * 1_000_000)
             return dt + timedelta(microseconds=micro)
-        elif len(base) == 14:
+        if len(base) == 14:
             dt = datetime.strptime(base, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
             micro = int(float(f"0.{frac}") * 1_000_000)
             return dt + timedelta(microseconds=micro)
@@ -59,22 +63,18 @@ def _parse_gpsu(val: str) -> Optional[datetime]:
 
 
 def unpack_value(type_byte: int, type_size: int, repeat: int, raw_payload: bytes) -> Any:
-    """Unpack raw KLV payload into Python native data structures."""
+    """Unpack a raw KLV payload into Python native data structures."""
     if not raw_payload:
         return None
 
     type_char = bytes([type_byte])
-    total_len = len(raw_payload)
 
-    # String types
     if type_char in (b"c", b"U"):
         return raw_payload.decode("utf-8", errors="replace").rstrip("\x00")
 
-    # FourCC
     if type_char == b"F":
         return raw_payload.decode("ascii", errors="replace").rstrip("\x00")
 
-    # Numeric unpacking
     fmt_map = {
         b"b": (1, "b"),
         b"B": (1, "B"),
@@ -90,7 +90,7 @@ def unpack_value(type_byte: int, type_size: int, repeat: int, raw_payload: bytes
 
     if type_char in fmt_map:
         size, code = fmt_map[type_char]
-        count = total_len // size
+        count = len(raw_payload) // size
         if count == 0:
             return None
         unpacked = list(struct.unpack(f">{count}{code}", raw_payload[: count * size]))
@@ -109,10 +109,7 @@ def unpack_klv_stream(data: bytes) -> List[KLV]:
 
     while offset + 8 <= total:
         fourcc_bytes = data[offset : offset + 4]
-        try:
-            fourcc = fourcc_bytes.decode("ascii", errors="replace")
-        except Exception:
-            fourcc = str(fourcc_bytes)
+        fourcc = fourcc_bytes.decode("ascii", errors="replace")
 
         type_byte = data[offset + 4]
         type_size = data[offset + 5]
@@ -120,7 +117,6 @@ def unpack_klv_stream(data: bytes) -> List[KLV]:
 
         payload_size = type_size * repeat
         padded_size = (payload_size + 3) & ~3
-
         payload_start = offset + 8
         payload_end = payload_start + payload_size
         next_offset = payload_start + padded_size
@@ -129,11 +125,10 @@ def unpack_klv_stream(data: bytes) -> List[KLV]:
             break
 
         raw_payload = data[payload_start:payload_end]
-        is_container = (type_byte == 0) or (fourcc in ("DEVC", "STRM"))
+        is_container = type_byte == 0 or fourcc in ("DEVC", "STRM")
 
         children: List[KLV] = []
         parsed_val: Any = None
-
         if is_container:
             children = unpack_klv_stream(raw_payload)
         else:
@@ -150,14 +145,13 @@ def unpack_klv_stream(data: bytes) -> List[KLV]:
                 parsed_value=parsed_val,
             )
         )
-
         offset = next_offset
 
     return elements
 
 
 def _extract_scal(val: Any) -> List[float]:
-    """Extract a list of scale factors from parsed SCAL value."""
+    """Extract a list of scale factors from a parsed SCAL value."""
     if val is None:
         return []
     if isinstance(val, (int, float)):
@@ -167,12 +161,37 @@ def _extract_scal(val: Any) -> List[float]:
     return []
 
 
+def _determine_stride(klv: KLV, total_vals: int, val_size: int) -> int:
+    """Determine values-per-sample for a GPS KLV node.
+
+    The fourcc is authoritative: GPS5 carries 5 values per sample and GPS9
+    carries 9.  Synthetic/legacy streams sometimes encode the per-sample size
+    in the KLV type-size field; honour that when it is consistent.  Only
+    unknown stream types fall back to divisibility heuristics.
+    """
+    if klv.fourcc in ("GPS5", "GPS9"):
+        expected = 5 if klv.fourcc == "GPS5" else 9
+        if klv.type_size >= expected * val_size and klv.type_size % val_size == 0:
+            stride = klv.type_size // val_size
+            if stride in (5, 7, 9) and total_vals % stride == 0:
+                return stride
+        return expected
+
+    if klv.type_size >= 20 and klv.type_size % val_size == 0:
+        return klv.type_size // val_size
+    for candidate in (9, 7, 5):
+        if total_vals % candidate == 0:
+            return candidate
+    return 5
+
+
 def _parse_gps_payload(
     klv: KLV,
     scal_list: List[float],
     current_gpsu: Optional[datetime],
+    start_index: int = 0,
 ) -> List[GpsPoint]:
-    """Parse GPS5 or GPS9 sensor samples into scaled GpsPoint models."""
+    """Parse GPS5/GPS9 samples into scaled GpsPoint models."""
     raw = klv.raw_payload
     if not raw:
         return []
@@ -199,23 +218,7 @@ def _parse_gps_payload(
         return []
 
     unpacked = struct.unpack(f">{total_vals}{fmt_char}", raw[: total_vals * val_size])
-
-    # Determine stride per sample
-    if klv.type_size >= 20 and klv.type_size % val_size == 0:
-        stride = klv.type_size // val_size
-    elif total_vals % 9 == 0 and total_vals % 5 != 0:
-        stride = 9
-    elif total_vals % 7 == 0 and total_vals % 5 != 0:
-        stride = 7
-    elif total_vals % 5 == 0:
-        stride = 5
-    elif total_vals % 7 == 0:
-        stride = 7
-    elif total_vals % 9 == 0:
-        stride = 9
-    else:
-        stride = 5
-
+    stride = _determine_stride(klv, total_vals, val_size)
     num_samples = total_vals // stride
     points: List[GpsPoint] = []
 
@@ -223,10 +226,13 @@ def _parse_gps_payload(
         if not scal_list:
             return 1.0
         val = scal_list[idx] if idx < len(scal_list) else scal_list[0]
-        return float(val) if val != 0 else 1.0
+        try:
+            return float(val) if val != 0 else 1.0
+        except (TypeError, ValueError):
+            return 1.0
 
-    for i in range(num_samples):
-        chunk = unpacked[i * stride : (i + 1) * stride]
+    for sample_idx in range(num_samples):
+        chunk = unpacked[sample_idx * stride : (sample_idx + 1) * stride]
         if len(chunk) < 3:
             continue
 
@@ -242,21 +248,19 @@ def _parse_gps_payload(
             alt = float(raw_alt) / get_scale(2)
             s2d = float(raw_s2d) / get_scale(3) if len(chunk) > 3 else None
             s3d = float(raw_s3d) / get_scale(4) if len(chunk) > 4 else None
+        elif abs(raw_lat) > 360:
+            lat = float(raw_lat) / 10_000_000.0
+            lon = float(raw_lon) / 10_000_000.0
+            alt = float(raw_alt) / 1000.0
+            s2d = float(raw_s2d) / 1000.0 if len(chunk) > 3 else None
+            s3d = float(raw_s3d) / 1000.0 if len(chunk) > 4 else None
         else:
-            if abs(raw_lat) > 360:
-                lat = float(raw_lat) / 10_000_000.0
-                lon = float(raw_lon) / 10_000_000.0
-                alt = float(raw_alt) / 1000.0
-                s2d = float(raw_s2d) / 1000.0 if len(chunk) > 3 else None
-                s3d = float(raw_s3d) / 1000.0 if len(chunk) > 4 else None
-            else:
-                lat = float(raw_lat)
-                lon = float(raw_lon)
-                alt = float(raw_alt)
-                s2d = float(raw_s2d) if len(chunk) > 3 else None
-                s3d = float(raw_s3d) if len(chunk) > 4 else None
+            lat = float(raw_lat)
+            lon = float(raw_lon)
+            alt = float(raw_alt)
+            s2d = float(raw_s2d) if len(chunk) > 3 else None
+            s3d = float(raw_s3d) if len(chunk) > 4 else None
 
-        # Calculate timestamp
         ts_utc: Optional[str] = None
         if len(chunk) >= 7:
             raw_days = chunk[5]
@@ -268,8 +272,9 @@ def _parse_gps_payload(
             )
             ts_utc = dt.isoformat()
         elif current_gpsu:
-            # 18Hz approximate sample delta
-            dt = current_gpsu + timedelta(seconds=i * (1.0 / 18.0))
+            # GPSP (precision time) is not parsed yet, so this is approximate.
+            sample_number = start_index + sample_idx
+            dt = current_gpsu + timedelta(seconds=sample_number / GPS_NOMINAL_HZ)
             ts_utc = dt.isoformat()
 
         points.append(
@@ -287,21 +292,24 @@ def _parse_gps_payload(
 
 
 def _process_strm(strm_klv: KLV, track: TelemetryTrack) -> None:
-    """Process a STRM container node."""
+    """Process a STRM container sequentially, tracking GPSU second resets."""
     scal_list: List[float] = []
-    current_gpsu: Optional[datetime] = None
-
-    # First pass: find SCAL and GPSU
     for child in strm_klv.children:
         if child.fourcc == "SCAL":
             scal_list = _extract_scal(child.parsed_value)
-        elif child.fourcc == "GPSU":
-            current_gpsu = _parse_gpsu(str(child.parsed_value))
+            break
 
-    # Second pass: process sensors
+    current_gpsu: Optional[datetime] = None
+    sample_index = 0
     for child in strm_klv.children:
-        if child.fourcc in ("GPS5", "GPS9"):
-            points = _parse_gps_payload(child, scal_list, current_gpsu)
+        if child.fourcc == "SCAL":
+            continue
+        if child.fourcc == "GPSU":
+            current_gpsu = _parse_gpsu(str(child.parsed_value))
+            sample_index = 0
+        elif child.fourcc in ("GPS5", "GPS9"):
+            points = _parse_gps_payload(child, scal_list, current_gpsu, sample_index)
+            sample_index += len(points)
             track.gps_points.extend(points)
         elif child.fourcc == "ACCL":
             track.has_accel = True
@@ -326,8 +334,7 @@ def _process_klv(klv: KLV, track: TelemetryTrack) -> None:
     elif klv.fourcc == "STRM":
         _process_strm(klv, track)
     elif klv.fourcc in ("GPS5", "GPS9"):
-        points = _parse_gps_payload(klv, [], None)
-        track.gps_points.extend(points)
+        track.gps_points.extend(_parse_gps_payload(klv, [], None))
     elif klv.fourcc == "ACCL":
         track.has_accel = True
     elif klv.fourcc == "GYRO":
@@ -340,25 +347,21 @@ def _process_klv(klv: KLV, track: TelemetryTrack) -> None:
 
 
 def parse_gpmf_stream(raw_bytes: bytes) -> TelemetryTrack:
-    """Parse raw GPMF binary bytes and return populated TelemetryTrack."""
+    """Parse raw GPMF binary bytes and return a populated TelemetryTrack."""
     track = TelemetryTrack(device_name="GoPro")
     if not raw_bytes:
         return track
-
-    top_klvs = unpack_klv_stream(raw_bytes)
-    for klv in top_klvs:
+    for klv in unpack_klv_stream(raw_bytes):
         _process_klv(klv, track)
-
     return track
 
 
-def extract_gpmf_from_mp4(file_path: Union[Path, str]) -> bytes:
+def extract_gpmf_from_mp4(file_path: Path | str) -> bytes:
     """Extract raw GPMF telemetry bytes from an MP4 file using ffmpeg."""
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"Telemetry video file not found: {path}")
 
-    # Directly return raw payloads if given a binary file
     if path.suffix.lower() in (".bin", ".raw", ".gpmf"):
         return path.read_bytes()
 
@@ -367,7 +370,7 @@ def extract_gpmf_from_mp4(file_path: Union[Path, str]) -> bytes:
 
     try:
         commands = [
-            # 1. Standard GoPro MET track handler
+            # Standard GoPro MET track handler
             [
                 "ffmpeg", "-y", "-i", str(path),
                 "-codec", "copy",
@@ -375,7 +378,7 @@ def extract_gpmf_from_mp4(file_path: Union[Path, str]) -> bytes:
                 "-f", "rawvideo",
                 str(tmp_path),
             ],
-            # 2. First data stream
+            # First data stream fallback
             [
                 "ffmpeg", "-y", "-i", str(path),
                 "-codec", "copy",
@@ -383,7 +386,7 @@ def extract_gpmf_from_mp4(file_path: Union[Path, str]) -> bytes:
                 "-f", "rawvideo",
                 str(tmp_path),
             ],
-            # 3. Alternative handler name
+            # Alternative handler name
             [
                 "ffmpeg", "-y", "-i", str(path),
                 "-codec", "copy",
@@ -391,7 +394,7 @@ def extract_gpmf_from_mp4(file_path: Union[Path, str]) -> bytes:
                 "-f", "rawvideo",
                 str(tmp_path),
             ],
-            # 4. Fallback to raw data muxer
+            # Raw data muxer fallback
             [
                 "ffmpeg", "-y", "-i", str(path),
                 "-codec", "copy",
@@ -404,16 +407,16 @@ def extract_gpmf_from_mp4(file_path: Union[Path, str]) -> bytes:
         last_err = ""
         for cmd in commands:
             try:
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if res.returncode == 0 and tmp_path.stat().st_size > 0:
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode == 0 and tmp_path.stat().st_size > 0:
                     return tmp_path.read_bytes()
-                last_err = res.stderr.decode("utf-8", errors="replace")
-            except FileNotFoundError:
-                raise RuntimeError("ffmpeg executable not found in PATH")
-            except Exception as e:
-                last_err = str(e)
+                last_err = result.stderr.decode("utf-8", errors="replace")
+            except FileNotFoundError as exc:
+                raise TelemetryError("ffmpeg executable not found in PATH") from exc
+            except Exception as exc:
+                last_err = str(exc)
 
-        raise RuntimeError(f"Failed to extract GPMF telemetry track from {path}: {last_err}")
+        raise TelemetryError(f"Failed to extract GPMF telemetry track from {path}: {last_err}")
     finally:
         if tmp_path.exists():
             tmp_path.unlink()

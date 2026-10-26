@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import io
 import os
 from pathlib import Path
 import struct
@@ -202,6 +201,29 @@ class TestDownloader:
             size = get_remote_file_size(url, client=client)
             assert size == file_size_64bit
 
+    def test_head_rejected_falls_back_to_ranged_get(self):
+        url = "http://172.24.162.51:8080/videos/DCIM/100GOPRO/GX010123.MP4"
+        file_size_64bit = 5_368_709_120
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(405)
+            if request.method == "GET":
+                assert request.headers.get("Range") == "bytes=0-0"
+                return httpx.Response(
+                    206,
+                    headers={
+                        "Content-Range": f"bytes 0-0/{file_size_64bit}",
+                        "Content-Length": "1",
+                    },
+                    content=b"x",
+                )
+            return httpx.Response(400)
+
+        transport = httpx.MockTransport(handler)
+        with httpx.Client(transport=transport) as client:
+            assert get_remote_file_size(url, client=client) == file_size_64bit
+
     def test_download_file_complete_flow(self, tmp_path: Path):
         url = "http://172.24.162.51:8080/videos/DCIM/100GOPRO/GX010001.MP4"
         content = b"GoPro Video Payload Simulation 12345" * 100
@@ -365,8 +387,8 @@ class TestStitcher:
             manifest_path = cmd[manifest_idx]
             # Read manifest while it still exists
             manifest_content = Path(manifest_path).read_text()
-            # Simulate FFmpeg producing output
-            out.write_bytes(b"stitched_video_content")
+            # Simulate FFmpeg producing the temporary output
+            Path(cmd[-1]).write_bytes(b"stitched_video_content")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
@@ -382,7 +404,7 @@ class TestStitcher:
         assert "-safe" in called_cmd and called_cmd[called_cmd.index("-safe") + 1] == "0"
         assert "-map" in called_cmd and called_cmd[called_cmd.index("-map") + 1] == "0"
         assert "-c" in called_cmd and called_cmd[called_cmd.index("-c") + 1] == "copy"
-        assert str(out) in called_cmd
+        assert called_cmd[-1] == str(tmp_path / "stitched.partial.mp4")
 
         # Verify manifest content
         assert f"file '{ch1}'" in manifest_content
