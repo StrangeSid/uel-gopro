@@ -1,6 +1,8 @@
 # UEL-GoPro roadmap
 
-This file plans work after the 0.1.1 source tree. At the start of this plan PyPI served 0.1.0, so the first gate is a tagged, validated 0.1.1 release. Dates are relative weeks and assume one maintainer with access to HERO9 through HERO13, one macOS host, and one Linux host. Ordering is by risk.
+This file plans work after the 0.1.1 source tree. 0.1.1 was tagged and published to GitHub and PyPI on 2026-10-28 on software checks only. The hardware matrix remains open. A hardware failure should ship as a 0.1.2 patch before 0.2.0.
+
+Dates are relative weeks and assume one maintainer with access to HERO9 through HERO13, one macOS host, and one Linux host. Ordering is by risk.
 
 ## Current baseline
 
@@ -10,9 +12,9 @@ This file plans work after the 0.1.1 source tree. At the start of this plan PyPI
 - Media downloads are sequential and resumable, with byte-count checks. There are no checksums, free-space checks, or parallel transfers. Stitch uses FFmpeg stream copy.
 - Distribution has no stable Homebrew tap, no signed binaries, no `py.typed`, and no coverage or type-check gate. The local PyInstaller spec is gitignored.
 
-## 1. v0.1.1 release gate
+## 1. v0.1.1 publication and hardware gate
 
-`pyproject.toml` already says 0.1.1. The gate is evidence and publication, not a version bump.
+The software and publication gate is complete. The hardware matrix below was not run for 0.1.1 and now blocks 0.2.0. A hardware failure should ship as a 0.1.2 patch.
 
 | Check | HERO9 | HERO10 | HERO11 | HERO12 | HERO13 |
 |---|---|---|---|---|---|
@@ -26,14 +28,14 @@ This file plans work after the 0.1.1 source tree. At the start of this plan PyPI
 
 Legend: run means execute on that model and record pass, fail, or unsupported with the firmware or host reason.
 
-Evidence lives in `docs/validation/0.1.1.md` and records date, host OS, camera model, firmware, command, result, and one output line. A fail on USB, Wi-Fi, BLE, stitch, or GPS blocks the release. Webcam and MTP may be unsupported only with a stated reason. At least one real GPS5 track and one real GPS9 track must pass, whichever models emit each format.
+Evidence lives in `docs/validation/0.1.1.md` and records date, host OS, camera model, firmware, command, result, and one output line. A fail on USB, Wi-Fi, BLE, stitch, or GPS blocks 0.2.0. Webcam and MTP may be unsupported only with a stated reason. At least one real GPS5 track and one real GPS9 track must pass, whichever models emit each format.
 
 - [x] Run `uv sync`, `uv run pytest -q`, `uv run ruff check src tests`, and `uv build` on the release commit. All four pass; see [docs/validation/0.1.1.md](docs/validation/0.1.1.md).
-- [ ] Create annotated tag `v0.1.1` and push it. Done when the publish workflow accepts the tag and version match.
-- [ ] Publish a GitHub release with changes since 0.1.0, the validation link, and known limitations. Done when the release is public.
-- [ ] Publish to PyPI through the trusted-publishing workflow. Done when `uv tool install uel-gopro==0.1.1` in a clean container reports 0.1.1.
-- [ ] Decide Homebrew: stable tap or HEAD-only. A stable tap needs a release tarball URL and sha256 in the formula; HEAD-only needs a README note and formula comment. Done when the decision is recorded and the install command is tested.
-- [ ] Attach wheel, sdist, and `SHA256SUMS` to the release. Skip prebuilt binaries unless the section 5 work is done and signed. Done when `shasum -a 256 -c SHA256SUMS` passes on a downloaded set.
+- [x] Create annotated tag `v0.1.1` and push it. The publish workflow accepted the tag and version match.
+- [x] Publish a GitHub release with changes since 0.1.0, the validation link, and known limitations. The release is public at https://github.com/StrangeSid/uel-gopro/releases/tag/v0.1.1.
+- [x] Publish to PyPI through the trusted-publishing workflow. A clean install reports 0.1.1.
+- [x] Decide Homebrew: HEAD-only for 0.1.1, with a stable tap deferred. The formula and README record the decision.
+- [x] Attach wheel, sdist, and `SHA256SUMS` to the release. The release has all three assets.
 - [ ] Test `install.sh` on both paths: git install from `main` and the PyPI fallback. Done when both produce a working 0.1.1 command.
 
 ## 2. Protocol work
@@ -103,7 +105,7 @@ Evidence lives in `docs/validation/0.1.1.md` and records date, host OS, camera m
 
 | Phase | Window | Work | Exit criteria |
 |---|---|---|---|
-| 0 | week 1 | v0.1.1 gate | matrix complete, tag and PyPI release out, Homebrew decision recorded |
+| 0 | week 1 | v0.1.1 gate | software checks and publication complete; hardware matrix open; HEAD-only Homebrew recorded |
 | 1 | weeks 2-3 | BLE ack and pairing, GPSP, webcam status, preview readiness, legacy scope, COHN decision | hardware rows pass, tests added, decision written |
 | 2 | weeks 3-4 | retries, reuse, keep-alive, free space, checksums, parallel downloads | soak test passes with no regression |
 | 3 | weeks 5-6 | JSON schema, completions, batch, dry-run, logging, config decision | docs and snapshot tests merge |

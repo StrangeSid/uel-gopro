@@ -16,8 +16,8 @@ It is **alpha software**. The OpenGoPro HTTP API is the primary interface. Some
 endpoints only exist on newer cameras, and Bluetooth and USB-MTP support are
 narrower than the wired and Wi-Fi path.
 
-Current version: **0.1.1**. Install it from PyPI or from source. If PyPI is
-behind, use the source or main-branch installer. See [Installation](#installation).
+Current version: **0.1.1**. Install it from PyPI or from source. See
+[Installation](#installation).
 
 ---
 
@@ -77,8 +77,8 @@ uv tool install .
 uv run uel-gopro --help
 ```
 
-This installs the current source tree (0.1.1). Use it if you need unreleased
-changes or if PyPI is behind.
+This installs the current source tree (0.1.1). Use PyPI unless you need
+unreleased changes.
 
 ### One-line installer
 
@@ -99,12 +99,11 @@ uv tool install uel-gopro
 pip install uel-gopro
 ```
 
-The PyPI package is built from the tagged release. If `0.1.1` is not available
-yet, install from source or use the installer above.
+The PyPI package matches the tagged release.
 
 ### Homebrew (HEAD only)
 
-There is no stable Homebrew tap or release yet. From a checkout:
+There is no stable Homebrew tap or formula release yet. From a checkout:
 
 ```bash
 brew install --HEAD ./Formula/uel-gopro.rb
