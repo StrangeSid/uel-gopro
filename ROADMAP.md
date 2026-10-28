@@ -1,11 +1,11 @@
 # UEL-GoPro roadmap
 
-This file plans work after the 0.1.1 source tree. PyPI still serves 0.1.0, so the first gate is a tagged, validated 0.1.1 release. Dates are relative weeks and assume one maintainer with access to HERO9 through HERO13, one macOS host, and one Linux host. Ordering is by risk.
+This file plans work after the 0.1.1 source tree. At the start of this plan PyPI served 0.1.0, so the first gate is a tagged, validated 0.1.1 release. Dates are relative weeks and assume one maintainer with access to HERO9 through HERO13, one macOS host, and one Linux host. Ordering is by risk.
 
 ## Current baseline
 
 - The suite has 107 offline tests for protocol construction, parsers, mocked HTTP, and synthetic media. CI runs them on Linux only.
-- Transports are USB CDC-ECM, Wi-Fi AP, and manual IP. MTP is macOS-only and media-only. The BLE client can send shutter and Wi-Fi AP commands, the CLI exposes shutter only, and there is no response parsing.
+- Transports are USB CDC-ECM, Wi-Fi AP, and manual IP. MTP is macOS-only and media-only. The BLE client can send shutter and Wi-Fi AP commands, the CLI exposes shutter only, and there's no response parsing.
 - Telemetry covers GPS5 and GPS9 points with SCAL and GPSU. GPSP is ignored. IMU streams are detected but not decoded.
 - Media downloads are sequential and resumable, with byte-count checks. There are no checksums, free-space checks, or parallel transfers. Stitch uses FFmpeg stream copy.
 - Distribution has no stable Homebrew tap, no signed binaries, no `py.typed`, and no coverage or type-check gate. The local PyInstaller spec is gitignored.
@@ -28,7 +28,7 @@ Legend: run means execute on that model and record pass, fail, or unsupported wi
 
 Evidence lives in `docs/validation/0.1.1.md` and records date, host OS, camera model, firmware, command, result, and one output line. A fail on USB, Wi-Fi, BLE, stitch, or GPS blocks the release. Webcam and MTP may be unsupported only with a stated reason. At least one real GPS5 track and one real GPS9 track must pass, whichever models emit each format.
 
-- [ ] Run `uv sync`, `uv run pytest -q`, `uv run ruff check src tests`, and `uv build` on the release commit. Done when all four pass.
+- [x] Run `uv sync`, `uv run pytest -q`, `uv run ruff check src tests`, and `uv build` on the release commit. All four pass; see [docs/validation/0.1.1.md](docs/validation/0.1.1.md).
 - [ ] Create annotated tag `v0.1.1` and push it. Done when the publish workflow accepts the tag and version match.
 - [ ] Publish a GitHub release with changes since 0.1.0, the validation link, and known limitations. Done when the release is public.
 - [ ] Publish to PyPI through the trusted-publishing workflow. Done when `uv tool install uel-gopro==0.1.1` in a clean container reports 0.1.1.

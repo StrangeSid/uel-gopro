@@ -16,8 +16,8 @@ It is **alpha software**. The OpenGoPro HTTP API is the primary interface. Some
 endpoints only exist on newer cameras, and Bluetooth and USB-MTP support are
 narrower than the wired and Wi-Fi path.
 
-Current version: **0.1.1** (source). The latest PyPI release is **0.1.0** and
-doesn't contain the fixes in this tree. See [Installation](#installation).
+Current version: **0.1.1**. Install it from PyPI or from source. If PyPI is
+behind, use the source or main-branch installer. See [Installation](#installation).
 
 ---
 
@@ -34,13 +34,13 @@ doesn't contain the fixes in this tree. See [Installation](#installation).
 - The CLI lists, reads, and writes settings, and lists and loads presets.
 - The media commands list files. HTTP downloads resume with `.partial` files
   and HTTP Range, use `HEAD` for the authoritative size with a ranged-GET
-  fallback, and verify the byte count. The macOS MTP fallback does not resume.
+  fallback, and verify the byte count. The macOS MTP fallback doesn't resume.
 - Chapter stitching uses the FFmpeg concat demuxer with `-map 0 -c copy` and
   keeps video, audio, timecode, and `gpmd` telemetry tracks. `stitch` restores
   the first chapter's capture timestamp when the container exposes one.
 - GPMF GPS extraction uses a native KLV parser for GPS5 or GPS9 streams and
   exports GPX, KML, GeoJSON (with `bbox`), and CSV. The parser detects IMU
-  streams but does not export them yet.
+  streams but doesn't export them yet.
 - GoPro Labs QR support renders codes in the terminal with half blocks,
   exports PNG and SVG, and includes a small preset library.
 - Preview and webcam commands start the camera's preview stream and can launch
@@ -55,9 +55,9 @@ doesn't contain the fixes in this tree. See [Installation](#installation).
 ## Requirements
 
 - Python 3.11 or newer (3.13 recommended)
-- uv for the recommended install path ([install uv](https://docs.astral.sh/uv/))
+- Uv for the recommended install path ([install uv](https://docs.astral.sh/uv/))
 - FFmpeg for chapter stitching and GPMF extraction
-- mpv or ffplay for live preview (optional)
+- Mpv or ffplay for live preview (optional)
 - A GoPro camera compatible with the OpenGoPro HTTP API. HERO9 and newer
   cameras cover the core API. `/gopro/camera/info` and some webcam controls
   need HERO12+.
@@ -77,8 +77,8 @@ uv tool install .
 uv run uel-gopro --help
 ```
 
-This installs the current source tree (0.1.1). Use this path until a fixed
-release is published.
+This installs the current source tree (0.1.1). Use it if you need unreleased
+changes or if PyPI is behind.
 
 ### One-line installer
 
@@ -99,7 +99,8 @@ uv tool install uel-gopro
 pip install uel-gopro
 ```
 
-The current PyPI release is **0.1.0**. It predates the fixes in this tree.
+The PyPI package is built from the tagged release. If `0.1.1` is not available
+yet, install from source or use the installer above.
 
 ### Homebrew (HEAD only)
 
@@ -181,8 +182,7 @@ uel-gopro record photo --force    # trigger regardless of current mode
 ```
 
 `record photo` checks the current preset group and exits with an error outside
-a Photo preset unless you pass `--force`. Over BLE it can't read the mode, so
-without `--force` it warns and triggers the camera's current mode.
+a Photo preset unless you pass `--force`. Over BLE it can't read the mode. So without `--force` it warns and triggers the camera's current mode.
 
 ### Presets and settings
 
@@ -213,7 +213,7 @@ uel-gopro media delete GX010042.MP4 --force
 file or has a file suffix. It downloads one file at a time, resumes partial
 files, and checks the byte count against the camera's authoritative size.
 
-SD-card formatting is not supported. The OpenGoPro HTTP API doesn't expose a
+SD-card formatting isn't supported. The OpenGoPro HTTP API doesn't expose a
 format endpoint, so use the camera UI.
 
 ### Stitching and timestamps
@@ -240,7 +240,7 @@ uel-gopro telemetry export GX010042.MP4 --format csv
 Only GPS points are exported. The parser selects the GPS5 or GPS9 sample
 layout from the fourcc. GPSU timestamps are approximate because the parser
 doesn't read `GPSP` precision time yet. The parser detects accelerometer and
-gyroscope streams but does not decode them.
+gyroscope streams but doesn't decode them.
 
 ### GoPro Labs QR codes
 
@@ -293,7 +293,7 @@ notice. There's no OAuth flow.
 - No SD-card format command.
 - No parallel downloads. Downloads resume sequentially.
 - BLE is minimal. The CLI exposes shutter control. The client has a Wi-Fi AP
-  helper, but no command calls it. There is no response or ack parsing, pairing
+  helper, but no command calls it. There's no response or ack parsing, pairing
   UI, or multi-camera selection.
 - IMU telemetry isn't exported. Only GPS points are parsed into tracks.
 - GPS timestamps are approximate because `GPSP` isn't parsed.
