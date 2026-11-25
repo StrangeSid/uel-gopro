@@ -3,6 +3,10 @@
 > **Unofficial Extended Life GoPro Toolchain**
 > A local-first, scriptable CLI for OpenGoPro-compatible cameras.
 
+[![PyPI](https://img.shields.io/pypi/v/uel-gopro)](https://pypi.org/project/uel-gopro/)
+[![GitHub Release](https://img.shields.io/github/v/release/StrangeSid/uel-gopro)](https://github.com/StrangeSid/uel-gopro/releases/latest)
+[![CI](https://github.com/StrangeSid/uel-gopro/actions/workflows/ci.yml/badge.svg)](https://github.com/StrangeSid/uel-gopro/actions/workflows/ci.yml)
+
 ---
 
 ## What this is
@@ -16,7 +20,7 @@ It is **alpha software**. The OpenGoPro HTTP API is the primary interface. Some
 endpoints only exist on newer cameras, and Bluetooth and USB-MTP support are
 narrower than the wired and Wi-Fi path.
 
-Current version: **0.1.2**. Install it from PyPI or from source. See
+Current version: **0.1.2**. Install it from [PyPI](https://pypi.org/project/uel-gopro/) or from source. See
 [Installation](#installation).
 
 ---
