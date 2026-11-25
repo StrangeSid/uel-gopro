@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Optional
+import webbrowser
 
 import typer
 from rich.console import Console
@@ -20,16 +21,44 @@ from rich.progress import (
 from rich.table import Table
 
 from uel_gopro import __version__
-from uel_gopro.core.exceptions import CameraNotFoundError, MediaError, TransportError, UelError
+from uel_gopro.api.capabilities import detect_camera_model, resolve_setting_capabilities
+from uel_gopro.api.rest import SETTING_ALIASES as SETTING_ALIASES
+from uel_gopro.api.rest import resolve_setting_id
+from uel_gopro.core.exceptions import (
+    CameraNotFoundError,
+    CommandError,
+    MediaError,
+    TransportError,
+    UelError,
+)
+from uel_gopro.core.models import CameraStatus
 from uel_gopro.media.downloader import download_file
 from uel_gopro.media.exif import extract_creation_time, sync_file_time
 from uel_gopro.media.stitcher import detect_chapters, stitch_chapters
+from uel_gopro.stream import (
+    DEFAULT_STREAM_URL,
+    LiveCameraController,
+    LiveFeedServer,
+    default_downloads_dir,
+)
 from uel_gopro.transport.manager import resolve_camera
 from uel_gopro.transport.usb import detect_usb_camera
 
 console = Console()
 err_console = Console(stderr=True)
 logger = logging.getLogger(__name__)
+
+
+async def _scan_gopro_ble(timeout: float = 10.0, attempts: int = 2) -> list:
+    """Scan for BLE cameras, retrying because advertising can be intermittent."""
+    from uel_gopro.transport.ble import GoProBleClient
+
+    for attempt in range(attempts):
+        devices = await GoProBleClient.scan(timeout=timeout)
+        if devices:
+            return devices
+        logger.debug("BLE scan attempt %s/%s found no cameras", attempt + 1, attempts)
+    return []
 
 app = typer.Typer(
     name="uel-gopro",
@@ -83,12 +112,11 @@ def main_callback(
 def cmd_discover(
     scan_ble: bool = typer.Option(False, "--ble", "-b", help="Scan for nearby BLE GoPro cameras"),
     json_output: bool = typer.Option(False, "--json", help="Output results in JSON format"),
-    timeout: float = typer.Option(2.5, "--timeout", "-t", help="Scan timeout in seconds"),
+    timeout: float = typer.Option(2.5, "--timeout", "-t", help="USB/MTP scan timeout in seconds"),
+    ble_timeout: float = typer.Option(10.0, "--ble-timeout", help="BLE scan timeout in seconds"),
 ) -> None:
     """Scan USB CDC-ECM, USB MTP, and optionally BLE for GoPro cameras."""
     import asyncio
-
-    from uel_gopro.transport.ble import GoProBleClient
 
     cam = detect_usb_camera(timeout_sec=timeout)
 
@@ -109,9 +137,10 @@ def cmd_discover(
 
     ble_devices = []
     if scan_ble:
-        console.print("[cyan]Scanning for GoPro BLE devices...[/cyan]")
+        if not json_output:
+            console.print("[cyan]Scanning for GoPro BLE devices...[/cyan]")
         try:
-            ble_devices = asyncio.run(GoProBleClient.scan(timeout=timeout))
+            ble_devices = asyncio.run(_scan_gopro_ble(timeout=ble_timeout, attempts=2))
         except Exception as exc:
             raise TransportError(f"BLE scan failed: {exc}") from exc
 
@@ -124,7 +153,7 @@ def cmd_discover(
         for device in ble_devices:
             results.append(
                 {
-                    "model_name": getattr(device, "name", "GoPro BLE"),
+                    "model_name": getattr(device, "name", None) or "GoPro BLE",
                     "address": getattr(device, "address", ""),
                     "transport": "ble",
                 }
@@ -164,6 +193,36 @@ def cmd_discover(
         )
 
 
+def _format_status_lines(status: CameraStatus, label_width: int = 12) -> str:
+    """Format recording, mode, SD card, remaining capacity, and thermals lines."""
+    recording = "[bold red]● RECORDING[/bold red]" if status.is_recording else "[dim]Standby[/dim]"
+    free_mb = f"{status.sd_remaining_mb:,} MB free" if status.sd_remaining_mb is not None else "free space unknown"
+    preset_line = f" (preset {status.current_preset})" if status.current_preset else ""
+
+    remaining_parts = []
+    if status.sd_remaining_photos is not None:
+        remaining_parts.append(f"{status.sd_remaining_photos:,} photos")
+    if status.sd_remaining_video_time_sec is not None:
+        total_seconds = max(0, status.sd_remaining_video_time_sec)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        remaining_parts.append(f"{hours:d}:{minutes:02d}:{seconds:02d} video")
+    remaining_str = " / ".join(remaining_parts) if remaining_parts else "unknown"
+    thermals = "[bold red]OVERHEAT WARNING[/bold red]" if status.system_hot else "[green]Nominal[/green]"
+
+    rows = [
+        ("State:", recording),
+        ("Mode:", f"{status.current_mode}{preset_line}"),
+        ("SD card:", f"{status.sd_status} ({free_mb})"),
+        ("Remaining:", remaining_str),
+        ("Thermals:", thermals),
+    ]
+    return "\n".join(
+        f"[bold cyan]{label}[/bold cyan]{' ' * max(1, label_width - len(label))}{val}"
+        for label, val in rows
+    )
+
+
 @app.command("status")
 def cmd_status(
     ip: Optional[str] = typer.Option(None, "--ip", help="Manual camera IP"),
@@ -176,62 +235,94 @@ def cmd_status(
     from uel_gopro.transport.ble import GoProBleClient
 
     if use_ble:
-        console.print("[cyan]Connecting to GoPro over Bluetooth Low Energy...[/cyan]")
+        if not json_output:
+            console.print("[cyan]Connecting to GoPro over Bluetooth Low Energy...[/cyan]")
 
         async def query_ble():
-            devices = await GoProBleClient.scan(timeout=3.0)
+            devices = await _scan_gopro_ble(timeout=10.0, attempts=2)
             if not devices:
                 raise UelError("No GoPro cameras discovered over BLE. Ensure the camera is awake.")
             target = devices[0]
             client = GoProBleClient(address=target.address)
-            await client.connect()
             try:
-                battery = await client.get_battery_level()
+                await client.connect()
+                battery = 0
+                try:
+                    battery = await client.get_battery_level()
+                except Exception as exc:
+                    logger.debug("BLE GATT battery read failed: %s", exc)
                 info = await client.get_device_info()
+                cam_status = None
+                try:
+                    cam_status = await client.get_camera_status()
+                except Exception as exc:
+                    logger.debug("BLE camera status query failed: %s", exc)
             finally:
                 try:
                     if client.is_connected:
                         await client.disconnect()
                 except Exception:
                     pass
-            return target, battery, info
+            return target, battery, info, cam_status
 
         try:
-            target, battery, dev_info = asyncio.run(query_ble())
+            target, battery, dev_info, cam_status = asyncio.run(query_ble())
         except UelError:
             raise
         except Exception as exc:
             raise TransportError(f"BLE status query failed: {exc}") from exc
 
+        device_name = getattr(target, "name", None) or "GoPro"
+        effective_battery = battery
+        if (not effective_battery) and cam_status and cam_status.battery_percent is not None:
+            effective_battery = cam_status.battery_percent
+
+        model_label = detect_camera_model(
+            model_name=dev_info.get("model"),
+            firmware_version=dev_info.get("firmware"),
+            model_id=dev_info.get("model"),
+        )
+        raw_model = dev_info.get("model")
+        display_model = (
+            model_label
+            if model_label != "Generic OpenGoPro"
+            else (raw_model or "Unknown model")
+        )
+
         if json_output:
-            typer.echo(
-                json.dumps(
-                    {
-                        "transport": "ble",
-                        "device_name": getattr(target, "name", "GoPro"),
-                        "address": target.address,
-                        "battery_percent": battery,
-                        **dev_info,
-                    },
-                    indent=2,
-                )
-            )
+            json_payload = {
+                "transport": "ble",
+                "device_name": device_name,
+                "address": target.address,
+                "battery_percent": effective_battery,
+                **dev_info,
+                "model": display_model,
+                "model_name": model_label,
+                "status": cam_status.model_dump() if cam_status else None,
+            }
+            if raw_model and raw_model != display_model:
+                json_payload["model_id"] = raw_model
+            typer.echo(json.dumps(json_payload, indent=2))
             return
 
-        battery_str = f"{battery}%"
-        if battery < 20:
+        battery_str = f"{effective_battery}%"
+        if effective_battery < 20:
             battery_str = f"[bold red]{battery_str}[/bold red]"
         else:
             battery_str = f"[bold green]{battery_str}[/bold green]"
+        if cam_status and cam_status.is_charging:
+            battery_str += " ⚡ [green](Charging)[/green]"
 
         panel_text = (
-            f"[bold cyan]Camera:[/bold cyan]       {getattr(target, 'name', 'GoPro')} "
-            f"({dev_info.get('model', 'Unknown model')})\n"
+            f"[bold cyan]Camera:[/bold cyan]       {device_name} "
+            f"({display_model})\n"
             f"[bold cyan]Address:[/bold cyan]      {target.address} (BLE)\n"
             f"[bold cyan]Battery:[/bold cyan]      {battery_str}\n"
             f"[bold cyan]Firmware:[/bold cyan]     {dev_info.get('firmware', 'Unknown')}\n"
             f"[bold cyan]Serial:[/bold cyan]       {dev_info.get('serial', 'Unknown')}"
         )
+        if cam_status is not None:
+            panel_text += "\n" + _format_status_lines(cam_status, label_width=14)
         console.print(Panel(panel_text, title="[bold]GoPro BLE Dashboard[/bold]", border_style="cyan"))
         return
 
@@ -269,32 +360,13 @@ def cmd_status(
     elif status.battery_percent is not None and status.battery_percent < 20:
         battery_str = f"[bold red]{battery_str}[/bold red]"
 
-    recording = "[bold red]● RECORDING[/bold red]" if status.is_recording else "[dim]Standby[/dim]"
-    free_mb = f"{status.sd_remaining_mb:,} MB free" if status.sd_remaining_mb is not None else "free space unknown"
-    preset_line = f" (preset {status.current_preset})" if status.current_preset else ""
-
-    remaining_parts = []
-    if status.sd_remaining_photos is not None:
-        remaining_parts.append(f"{status.sd_remaining_photos:,} photos")
-    if status.sd_remaining_video_time_sec is not None:
-        total_seconds = max(0, status.sd_remaining_video_time_sec)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        remaining_parts.append(f"{hours:d}:{minutes:02d}:{seconds:02d} video")
-    remaining_str = " / ".join(remaining_parts) if remaining_parts else "unknown"
-
     panel_text = (
         f"[bold cyan]Camera:[/bold cyan]     {info.model_name}\n"
         f"[bold cyan]Link:[/bold cyan]       {info.ip_address}:{info.port} ({info.transport.value.upper()})\n"
         f"[bold cyan]Firmware:[/bold cyan]   {info.firmware_version}\n"
         f"[bold cyan]Serial:[/bold cyan]     {info.serial_number or 'Unknown'}\n"
         f"[bold cyan]Battery:[/bold cyan]    {battery_str}\n"
-        f"[bold cyan]State:[/bold cyan]      {recording}\n"
-        f"[bold cyan]Mode:[/bold cyan]       {status.current_mode}{preset_line}\n"
-        f"[bold cyan]SD card:[/bold cyan]    {status.sd_status} ({free_mb})\n"
-        f"[bold cyan]Remaining:[/bold cyan]  {remaining_str}\n"
-        f"[bold cyan]Thermals:[/bold cyan]   "
-        f"{'[bold red]OVERHEAT WARNING[/bold red]' if status.system_hot else '[green]Nominal[/green]'}"
+        + _format_status_lines(status, label_width=12)
     )
     console.print(Panel(panel_text, title="[bold]GoPro Status[/bold]", border_style="cyan"))
 
@@ -306,7 +378,7 @@ def cmd_status(
 async def _dispatch_ble_shutter(start: bool) -> None:
     from uel_gopro.transport.ble import GoProBleClient
 
-    devices = await GoProBleClient.scan(timeout=3.0)
+    devices = await _scan_gopro_ble(timeout=10.0, attempts=2)
     if not devices:
         raise UelError("No GoPro cameras discovered over BLE.")
     client = GoProBleClient(address=devices[0].address)
@@ -457,20 +529,50 @@ def cmd_preset_load(
 # Camera settings
 # -----------------------------------------------------------------------------
 
-# Modern OpenGoPro setting IDs. Older cameras may use different IDs for
-# field-of-view and bitrate; pass a numeric ID to override.
-SETTING_ALIASES = {
-    "resolution": 2,
-    "res": 2,
-    "fps": 3,
-    "framerate": 3,
-    "fov": 121,
-    "lens": 121,
-    "bitrate": 182,
-}
+
+async def _run_ble_config(
+    setting_ids: Optional[list[int]] = None,
+    set_pair: Optional[tuple[int, int]] = None,
+) -> dict[int, int]:
+    """Connect to a GoPro over BLE and query or mutate camera settings."""
+    from uel_gopro.transport.ble import GoProBleClient
+
+    client: Optional[GoProBleClient] = None
+    try:
+        devices = await _scan_gopro_ble(timeout=10.0, attempts=2)
+        if not devices:
+            raise UelError("No GoPro cameras discovered over BLE. Ensure the camera is awake.")
+        client = GoProBleClient(address=devices[0].address)
+        await client.connect()
+        if set_pair is not None:
+            await client.set_setting(set_pair[0], set_pair[1])
+            return {set_pair[0]: set_pair[1]}
+        if setting_ids is not None:
+            return await client.get_settings(setting_ids)
+        return await client.get_settings()
+    except UelError:
+        raise
+    except Exception as exc:
+        raise TransportError(f"BLE config operation failed: {exc}") from exc
+    finally:
+        if client is not None:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception:
+                pass
 
 
-def _get_settings(ip: Optional[str]) -> dict:
+def _get_settings(
+    ip: Optional[str],
+    use_ble: bool = False,
+    setting_ids: Optional[list[int]] = None,
+) -> dict:
+    if use_ble:
+        import asyncio
+
+        raw_ble = asyncio.run(_run_ble_config(setting_ids=setting_ids))
+        return {str(k): v for k, v in raw_ble.items()}
     _, client = resolve_camera(target_ip=ip)
     raw = client.get_raw_state()
     return raw.get("settings", {}) or {}
@@ -491,29 +593,38 @@ def _render_settings(settings: dict, as_json: bool) -> None:
 @config_app.command("list")
 def cmd_config_list(
     ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Query/mutate settings over BLE"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """List all active camera settings."""
-    _render_settings(_get_settings(ip), as_json)
+    _render_settings(_get_settings(ip, use_ble=use_ble), as_json)
 
 
 @config_app.command("get")
 def cmd_config_get(
     setting: Optional[str] = typer.Argument(None, help="Optional setting name or numeric ID"),
     ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Query/mutate settings over BLE"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Get camera settings, or one setting by alias/ID."""
-    settings = _get_settings(ip)
     if not setting:
-        _render_settings(settings, as_json)
+        _render_settings(_get_settings(ip, use_ble=use_ble), as_json)
         return
 
-    setting_id = str(SETTING_ALIASES.get(setting.lower(), setting))
+    try:
+        resolved_id = resolve_setting_id(setting)
+    except CommandError as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    setting_id = str(resolved_id)
+    query_ids = [resolved_id] if use_ble else None
+    settings = _get_settings(ip, use_ble=use_ble, setting_ids=query_ids)
     value = settings.get(setting_id)
     if value is None:
         err_console.print(f"[yellow]Setting {setting} (ID {setting_id}) not found or not active.[/yellow]")
-        return
+        raise typer.Exit(code=1)
     if as_json:
         typer.echo(json.dumps({setting_id: value}, indent=2, default=str))
     else:
@@ -525,22 +636,140 @@ def cmd_config_set(
     setting: str = typer.Argument(..., help="Setting name (resolution, fps, fov, bitrate) or numeric ID"),
     value: int = typer.Argument(..., help="Value integer code"),
     ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(False, "--ble", "-b", help="Query/mutate settings over BLE"),
 ) -> None:
     """Set a camera setting value."""
-    setting_id = SETTING_ALIASES.get(setting.lower())
-    if setting_id is None:
-        try:
-            setting_id = int(setting)
-        except ValueError:
-            err_console.print(
-                f"[bold red]Unknown setting:[/bold red] '{setting}'. "
-                f"Valid aliases: {', '.join(SETTING_ALIASES)}"
-            )
-            raise typer.Exit(code=1)
+    import asyncio
+
+    try:
+        setting_id = resolve_setting_id(setting)
+    except CommandError as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if use_ble:
+        asyncio.run(_run_ble_config(set_pair=(setting_id, value)))
+        console.print(f"[green]✓ Set setting {setting} ({setting_id}) -> {value} over BLE[/green]")
+        return
 
     _, client = resolve_camera(target_ip=ip)
     client.set_setting(setting_id, value)
     console.print(f"[green]✓ Set setting {setting} ({setting_id}) -> {value}[/green]")
+
+
+async def _run_ble_capabilities() -> tuple[
+    dict[str, str], dict[int, int], Optional[dict[int, list[int]]]
+]:
+    """Connect to a GoPro over BLE and fetch device info, current settings, and available options."""
+    from uel_gopro.transport.ble import GoProBleClient
+
+    client: Optional[GoProBleClient] = None
+    try:
+        devices = await _scan_gopro_ble(timeout=10.0, attempts=2)
+        if not devices:
+            raise UelError("No GoPro cameras discovered over BLE. Ensure the camera is awake.")
+        client = GoProBleClient(address=devices[0].address)
+        await client.connect()
+        try:
+            dev_info = await client.get_device_info()
+        except Exception as exc:
+            logger.debug("BLE device info read failed during capabilities query: %s", exc)
+            dev_info = {}
+        current_settings = await client.get_settings()
+        available: Optional[dict[int, list[int]]]
+        try:
+            available = await client.get_available_settings()
+        except CommandError as exc:
+            logger.warning(
+                "BLE available settings query (0x32) failed; falling back to model matrix: %s",
+                exc,
+            )
+            available = None
+        return dev_info, current_settings, available
+    except UelError:
+        raise
+    except Exception as exc:
+        raise TransportError(f"BLE capabilities query failed: {exc}") from exc
+    finally:
+        if client is not None:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception:
+                pass
+
+
+@config_app.command("capabilities")
+def cmd_config_capabilities(
+    ip: Optional[str] = typer.Option(None, "--ip"),
+    use_ble: bool = typer.Option(
+        False,
+        "--ble",
+        "-b",
+        help="Query live setting capabilities over BLE (opcode 0x32)",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Show model- and setting-aware valid options for key camera settings."""
+    if use_ble:
+        import asyncio
+
+        dev_info, current_settings, available = asyncio.run(_run_ble_capabilities())
+        caps = resolve_setting_capabilities(
+            model_name=dev_info.get("model"),
+            current_settings=current_settings,
+            firmware_version=dev_info.get("firmware"),
+            model_id=dev_info.get("model"),
+            live_available=available,
+        )
+    else:
+        info, client = resolve_camera(target_ip=ip)
+        raw_state = client.get_raw_state() or {}
+        raw_settings = raw_state.get("settings")
+        current_settings = raw_settings if isinstance(raw_settings, dict) else {}
+        model_name = info.model_name
+        firmware_version = info.firmware_version
+        model_id = None
+        try:
+            details = client.get_camera_info() or {}
+            if isinstance(details, dict):
+                model_name = details.get("model_name") or model_name
+                firmware_version = details.get("firmware_version") or firmware_version
+                model_id = details.get("model_number")
+        except Exception as exc:
+            logger.debug("Camera info enrichment unavailable: %s", exc)
+
+        caps = resolve_setting_capabilities(
+            model_name=model_name,
+            current_settings=current_settings,
+            firmware_version=firmware_version,
+            model_id=model_id,
+        )
+
+    if as_json:
+        typer.echo(json.dumps(caps, indent=2, default=str))
+        return
+
+    title = f"{caps['model']} Valid Settings ({caps['anti_flicker_hz']} Hz · {caps['source']})"
+    table = Table(title=title, border_style="cyan")
+    table.add_column("Setting", style="cyan")
+    table.add_column("Current Value", style="bold white")
+    table.add_column("Valid Options", style="green")
+    for alias, spec in caps.get("settings", {}).items():
+        current_val = spec.get("current")
+        current_label = spec.get("current_label")
+        if current_val is None:
+            cur_str = "--"
+        elif current_label:
+            cur_str = f"{current_val}: {current_label}"
+        else:
+            cur_str = str(current_val)
+        opts_str = ", ".join(
+            f"{opt['value']}: {opt['label']}" for opt in spec.get("options", [])
+        )
+        setting_name = f"{spec.get('label', alias)} ({alias}, ID {spec.get('id')})"
+        table.add_row(setting_name, cur_str, opts_str or "--")
+    console.print(table)
 
 
 # -----------------------------------------------------------------------------
@@ -592,6 +821,101 @@ def cmd_stream_webcam(
     else:
         err_console.print(f"[red]Unknown action: {action}. Use 'start' or 'stop'.[/red]")
         raise typer.Exit(code=1)
+
+
+@stream_app.command("live")
+def cmd_stream_live(
+    ip: Optional[str] = typer.Option(None, "--ip", help="Manual camera IP"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host for the live feed server"),
+    port: int = typer.Option(8765, "--port", "-p", help="Bind port for the live feed server"),
+    downloads_dir: Optional[Path] = typer.Option(
+        None,
+        "--downloads-dir",
+        "-d",
+        help="Directory for captured media (defaults to ~/Downloads)",
+    ),
+    stream_url: str = typer.Option(
+        DEFAULT_STREAM_URL,
+        "--stream-url",
+        help="Camera preview stream URL",
+    ),
+    fps: int = typer.Option(30, "--fps", help="Live MJPEG viewfinder framerate (1-60)"),
+    open_browser: bool = typer.Option(
+        True,
+        "--open/--no-open",
+        help="Open the live viewfinder in your browser",
+    ),
+    cors_origin: Optional[str] = typer.Option(
+        None,
+        "--cors-origin",
+        help="Allow cross-origin API access from this origin",
+    ),
+    ffmpeg: str = typer.Option("ffmpeg", "--ffmpeg", help="Path to the FFmpeg binary"),
+    no_stream: bool = typer.Option(
+        False,
+        "--no-stream",
+        help="Start controls server without starting UDP stream/FFmpeg",
+    ),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help="Camera model hint (e.g. hero10, hero12) for setting options",
+    ),
+) -> None:
+    """Start a local live viewfinder, controls UI, and capture-to-Downloads server."""
+    info, client = resolve_camera(target_ip=ip)
+    target_downloads = (downloads_dir or default_downloads_dir()).expanduser()
+
+    controller = LiveCameraController(
+        client=client,
+        info=info,
+        downloads_dir=target_downloads,
+        stream_url=stream_url,
+        ffmpeg_path=ffmpeg,
+        fps=fps,
+        model_override=model,
+    )
+    try:
+        server = LiveFeedServer(
+            controller,
+            host=host,
+            port=port,
+            cors_origin=cors_origin,
+            start_stream=not no_stream,
+        )
+    except ValueError as exc:
+        controller.stop()
+        raise CommandError(str(exc)) from exc
+    except Exception:
+        controller.stop()
+        raise
+
+    try:
+        console.print(
+            Panel(
+                (
+                    f"[bold cyan]Viewfinder:[/bold cyan] {server.url}\n"
+                    f"[cyan]Embed URL:[/cyan]  {server.embed_url}\n"
+                    f"[cyan]Widget JS:[/cyan]  {server.widget_url}\n"
+                    f"[cyan]MJPEG Feed:[/cyan] {server.stream_url}\n"
+                    f"[green]Downloads:[/green]  {controller.captures.downloads_dir}\n\n"
+                    "[dim]Press Ctrl+C to stop.[/dim]"
+                ),
+                title="[bold]GoPro Live Camera Feed[/bold]",
+                border_style="cyan",
+            )
+        )
+        if open_browser:
+            try:
+                webbrowser.open(server.url)
+            except (webbrowser.Error, OSError) as exc:
+                logger.debug("Could not open browser for live view: %s", exc)
+                err_console.print(f"[yellow]Could not open browser automatically: {exc}[/yellow]")
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping live camera feed...[/yellow]")
+    finally:
+        server.shutdown()
 
 
 # -----------------------------------------------------------------------------
