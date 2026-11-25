@@ -15,13 +15,13 @@ handles scanning and commands.
 └───────────────┬───────────────────────────────┬──────────────┘
                 │                               │
 ┌───────────────▼──────────────┐   ┌────────────▼──────────────┐
-│ Transport                    │   │ Local processing          │
+│ Transport                    │   │ Local processing & stream │
 │ - USB CDC-ECM discovery      │   │ - FFmpeg chapter stitching│
 │ - Wi-Fi AP / manual IP       │   │ - MP4 timestamp parsing   │
 │ - MTP media fallback (macOS) │   │ - GPMF GPS parsing        │
 │ - BLE scanner/commands       │   │ - QR rendering            │
-└───────────────┬──────────────┘   └────────────┬──────────────┘
-                │                               │
+└───────────────┬──────────────┘   │ - MJPEG live feed & UI    │
+                │                  └────────────┬──────────────┘
 ┌───────────────▼───────────────────────────────▼──────────────┐
 │ Core: Pydantic models, exceptions, REST client               │
 └──────────────────────────────────────────────────────────────┘
@@ -29,7 +29,7 @@ handles scanning and commands.
 
 There is no global configuration file. Camera settings live on the camera,
 cloud credentials live in `~/.config/uel-gopro/cloud.json`, and download/output
-paths are CLI options.
+paths are CLI options (with `stream live` defaulting captures to `~/Downloads`).
 
 ## 1. Transport resolution
 
@@ -77,8 +77,9 @@ The parser accepts numeric strings and skips fields it cannot convert. Real
 camera state contains strings and empty strings (for example, `29` is the
 connected Wi-Fi SSID), so one bad field must not break the status output.
 
-`/gopro/camera/info` is optional: it is used by `status` when available
-(HERO12+) and failures are ignored on older cameras.
+`/gopro/camera/info` (HERO12+) is tried first and falls back to
+`/gp/gpControl/info` on older cameras (HERO9–11); failures are ignored on
+unsupported cameras.
 
 Settings are written with:
 
@@ -86,9 +87,13 @@ Settings are written with:
 GET /gopro/camera/setting?setting=<id>&option=<value>
 ```
 
-The parameter is `option`, not `opt`. The CLI exposes modern aliases
-(`resolution=2`, `fps=3`, `fov=121`, `bitrate=182`); callers can pass a numeric
-ID when a camera uses a different setting.
+The parameter is `option`, not `opt`. The CLI and live server expose modern
+aliases (`resolution`/`res`=2, `fps`/`framerate`=3, `fov`/`lens`=121,
+`anti_flicker`=134, `hypersmooth`=135, `bitrate`=182); callers can pass a
+numeric ID when a camera uses a different setting. `config list/get/set --ble`
+and `config capabilities [--ble|--ip]` also query/mutate settings over BLE and
+resolve model- and setting-aware options via `api/capabilities.py` (or BLE
+opcode `0x32` when available).
 
 ## 3. Media download
 
@@ -191,7 +196,43 @@ token file is written atomically with mode `0600`. Sync behavior:
 There is no OAuth flow and no official API guarantee. Treat cloud support as
 best-effort.
 
-## 8. CLI error model
+## 8. Live camera feed and controls
+
+`uel-gopro stream live` runs `LiveCameraController` and `LiveFeedServer`
+(`stream/live.py`) using Python's `ThreadingHTTPServer`:
+
+- **MJPEG transcoding (`stream/transcoder.py`)**: `MjpegStreamTranscoder`
+  (default `fps=30`, `read_chunk_size=8192`) spawns single-threaded FFmpeg with
+  low-delay passthrough flags (`+nobuffer+discardcorrupt`, `-flags low_delay`,
+  `-max_delay 0`, `-fps_mode passthrough`, `-flush_packets 1`, `fifo_size=5570` /
+  ~1 MB UDP FIFO)
+  to read the camera's UDP MPEG-TS preview stream (`udp://@0.0.0.0:8554` by
+  default, configurable via `--stream-url`, `--fps`, and `--ffmpeg`), drops
+  intermediate frames in Python when `--fps < 30`, and splits JPEG frames at
+  `SOI`/`EOI` markers for active subscribers. Passing `--no-stream` skips
+  starting the camera preview stream and FFmpeg.
+- **Capture-to-Downloads (`stream/capture.py`)**: `CaptureManager` defaults to
+  `~/Downloads` (`default_downloads_dir()`, overridable via `--downloads-dir`),
+  reserving collision-free filenames and writing downloads through
+  `media/downloader.py` atomic `.partial` transfers. Captures occur
+  automatically on record stop (`POST /api/shutter/stop`) and photo capture
+  (`POST /api/photo`), or explicitly via single-frame JPEG snapshot
+  (`POST /api/snapshot`) and pulling the latest SD card media
+  (`POST /api/media/pull`).
+- **HTTP and embed surfaces (`stream/live_ui.py`, `stream/live.py`)**:
+  - `/` — standalone browser viewfinder and controls UI with model- and
+    setting-aware Quick Settings (using `--model` override when provided)
+  - `/embed` — compact iframe-ready viewfinder and controls view
+  - `/widget.js` — `<uel-gopro-live>` shadow-DOM Web Component (`server`,
+    `controls`, and `auto-download` attributes)
+  - `/stream.mjpeg` — `multipart/x-mixed-replace` live MJPEG stream with
+    `TCP_NODELAY` enabled on the client socket
+  - `/api/*` — JSON status, presets, settings (`api/rest.py` `resolve_setting_id`
+    and `SETTING_ALIASES`), capabilities (`/api/capabilities` via
+    `api/capabilities.py`), captures, media, shutter, photo, snapshot, preview,
+    and media-pull endpoints, with optional CORS gated by `--cors-origin`.
+
+## 9. CLI error model
 
 `uel_gopro.cli.main:main()` wraps the Typer app and converts `UelError` and
 `OSError` into a single red error line with exit code 1. `KeyboardInterrupt`
@@ -202,7 +243,7 @@ The CLI emits JSON for `discover`, `status`, `preset list`, `config get/list`,
 `media list`, and `cloud list` with `typer.echo` rather than Rich, so you can
 pipe it into other tools.
 
-## 9. Testing
+## 10. Testing
 
 The suite runs offline:
 
@@ -217,5 +258,9 @@ The suite runs offline:
   (9 values/sample), GPSU accumulation, and exporters.
 - Stitcher tests verify the manifest, FFmpeg arguments, temporary output, and
   error paths.
+- Live feed tests (`test_live_transcoder.py`, `test_live_capture.py`,
+  `test_live_ui.py`, `test_live_server.py`) test JPEG frame parsing, download
+  reservation and snapshots, UI/widget rendering, and HTTP API/CORS endpoints
+  against local loopback sockets and mocked camera/FFmpeg processes.
 
 MTP tests skip when ImageCaptureCore is unavailable (for example on Linux).

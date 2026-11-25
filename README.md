@@ -43,9 +43,10 @@ Current version: **0.1.1**. Install it from PyPI or from source. See
   streams but doesn't export them yet.
 - GoPro Labs QR support renders codes in the terminal with half blocks,
   exports PNG and SVG, and includes a small preset library.
-- Preview and webcam commands start the camera's preview stream and can launch
-  `mpv` or `ffplay`, or start USB webcam mode at 480p/720p/1080p with a chosen
-  field of view.
+- Preview, live feed, and webcam commands start the camera's preview stream,
+  launch `mpv` or `ffplay`, serve a local browser viewfinder with camera
+  controls, embeddable surfaces, and capture-to-Downloads workflows, or start
+  USB webcam mode at 480p/720p/1080p with a chosen field of view.
 - GoPro Plus cloud mirroring provides paginated listing and resumable
   downloads with a user-supplied bearer token. It uses an undocumented GoPro
   API.
@@ -56,11 +57,12 @@ Current version: **0.1.1**. Install it from PyPI or from source. See
 
 - Python 3.11 or newer (3.13 recommended)
 - Uv for the recommended install path ([install uv](https://docs.astral.sh/uv/))
-- FFmpeg for chapter stitching and GPMF extraction
-- Mpv or ffplay for live preview (optional)
+- FFmpeg for chapter stitching, GPMF extraction, and live MJPEG viewfinder transcoding
+- Mpv or ffplay for `stream preview` (optional)
 - A GoPro camera compatible with the OpenGoPro HTTP API. HERO9 and newer
-  cameras cover the core API. `/gopro/camera/info` and some webcam controls
-  need HERO12+.
+  cameras cover the core API. `/gopro/camera/info` needs HERO12+ (with a
+  `/gp/gpControl/info` fallback for HERO9–11); some webcam controls require
+  HERO12+.
 
 ---
 
@@ -167,9 +169,10 @@ uel-gopro status --json
 uel-gopro status --ble
 ```
 
-`status` uses the OpenGoPro status map. When `/gopro/camera/info` is available
-(HERO12+), the dashboard also shows the real model, firmware, and serial
-number. Older cameras keep the generic transport label.
+`status` uses the OpenGoPro status map. When `/gopro/camera/info` (HERO12+) or
+the `/gp/gpControl/info` fallback (HERO9–11) is available, the dashboard also
+shows the real model, firmware, and serial number. Older cameras keep the
+generic transport label.
 
 ### Recording
 
@@ -190,15 +193,22 @@ uel-gopro preset list
 uel-gopro preset load 1000
 
 uel-gopro config list
+uel-gopro config list --ble
 uel-gopro config get 2
-uel-gopro config get resolution
+uel-gopro config get resolution --ble
 uel-gopro config set resolution 4
+uel-gopro config set hypersmooth 3 --ble
+uel-gopro config capabilities
+uel-gopro config capabilities --ble
 ```
 
-The current setting aliases are `resolution` (2), `fps` (3), `fov` (121), and
-`bitrate` (182). Older cameras may use different IDs, so pass a numeric ID.
-Bitrate and FOV option values are camera-dependent enums, not Mbps or
-millimetres.
+The current setting aliases are `resolution`/`res` (2), `fps`/`framerate` (3),
+`fov`/`lens` (121), `anti_flicker` (134), `hypersmooth` (135), and
+`bitrate` (182). `config list/get/set` and `config capabilities` also support
+`--ble` (using BLE TLV queries, including opcode `0x32` for live available
+options) and `--ip` for HTTP. Older cameras may use different IDs, so pass a
+numeric ID. Bitrate and FOV option values are camera-dependent enums, not Mbps
+or millimetres.
 
 ### Media
 
@@ -262,9 +272,43 @@ uel-gopro stream preview
 uel-gopro stream preview --player mpv
 uel-gopro stream preview --no-player
 
+uel-gopro stream live
+uel-gopro stream live --port 8765 --downloads-dir ~/Downloads --no-open
+uel-gopro stream live --cors-origin http://localhost:3000 --no-stream
+
 uel-gopro stream webcam start --res 1080p --fov linear
 uel-gopro stream webcam stop
 ```
+
+`stream live` starts a local HTTP viewfinder and control server backed by the
+camera's preview stream and OpenGoPro HTTP API:
+
+- Options: `--ip` (manual camera IP), `--host` (`127.0.0.1`), `--port`/`-p`
+  (`8765`), `--downloads-dir`/`-d` (`~/Downloads`), `--stream-url`
+  (`udp://@0.0.0.0:8554`), `--fps` (`1`–`60`, default `30`), `--model` (camera
+  model hint such as `hero10` or `hero12` for Quick Settings), `--open`/`--no-open`
+  (open the viewfinder in your browser, default `--open`), `--cors-origin`
+  (allow cross-origin `/api/*` requests), `--ffmpeg` (`ffmpeg`), and
+  `--no-stream` (run the controls and API server without starting the UDP
+  stream or FFmpeg).
+- Low-latency viewfinder & Quick Settings: FFmpeg uses low-delay passthrough
+  MJPEG (`-fps_mode passthrough`, `TCP_NODELAY` on `/stream.mjpeg`, and Python
+  frame pacing when `--fps < 30`), while the UI renders model- and
+  setting-aware Quick Settings (such as 50/60 Hz FPS options driven by
+  `anti_flicker`).
+- Capture storage: saved media defaults to `~/Downloads` (override with
+  `--downloads-dir`) using collision-free filenames and atomic `.partial`
+  transfers. Auto-download triggers on recording stop and photo capture, and the
+  UI/API also support single-frame JPEG snapshots and pulling the latest clip
+  or photo from the SD card.
+- Integration surfaces:
+  - `/` — full browser viewfinder and camera controls UI
+  - `/embed` — compact iframe-ready viewfinder and controls view
+  - `/widget.js` — standalone Web Component
+    (`<uel-gopro-live server="http://127.0.0.1:8765"></uel-gopro-live>`)
+  - `/stream.mjpeg` — live `multipart/x-mixed-replace` MJPEG stream (`TCP_NODELAY`)
+  - `/api/*` — JSON status, presets, settings, capabilities (`/api/capabilities`),
+    captures, shutter/photo/snapshot, preview, and media-pull endpoints
 
 Webcam codes follow the OpenGoPro API: 480p=4, 720p=7, 1080p=12. Field of
 view: wide=0, narrow=2, superview=3, linear=4.
