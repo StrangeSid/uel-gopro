@@ -45,6 +45,48 @@ PRESET_GROUP_NAMES = {
     2000: "General",
 }
 
+# Modern OpenGoPro setting IDs. Older cameras may use different IDs for
+# field-of-view and bitrate; pass a numeric ID to override.
+SETTING_ALIASES: Dict[str, int] = {
+    "resolution": 2,
+    "res": 2,
+    "fps": 3,
+    "framerate": 3,
+    "fov": 121,
+    "lens": 121,
+    "bitrate": 182,
+    "anti_flicker": 134,
+    "hypersmooth": 135,
+}
+
+
+def resolve_setting_id(setting: str | int) -> int:
+    """Resolve an OpenGoPro setting alias (case-insensitive) or numeric ID.
+
+    Raises:
+        CommandError: If the setting is a boolean, empty, negative, or unknown.
+    """
+    if isinstance(setting, bool):
+        raise CommandError(f"Invalid setting identifier: {setting!r}")
+    if isinstance(setting, int):
+        if setting < 0:
+            raise CommandError(f"Invalid setting ID: {setting}")
+        return setting
+    if not isinstance(setting, str):
+        raise CommandError(f"Invalid setting identifier: {setting!r}")
+
+    cleaned = setting.strip().lower()
+    if not cleaned:
+        raise CommandError("Setting identifier cannot be empty.")
+    if cleaned in SETTING_ALIASES:
+        return SETTING_ALIASES[cleaned]
+    if cleaned.isascii() and cleaned.isdigit():
+        return int(cleaned)
+
+    raise CommandError(
+        f"Unknown setting '{setting}'. Valid aliases: {', '.join(SETTING_ALIASES)}"
+    )
+
 
 def _as_int(value: Any) -> Optional[int]:
     """Best-effort integer coercion for camera status/settings values.
@@ -72,6 +114,57 @@ def _as_str(value: Any) -> Optional[str]:
     return text or None
 
 
+def parse_camera_status(status_dict: Dict[Any, Any]) -> CameraStatus:
+    """Parse an OpenGoPro status map (from HTTP JSON or BLE TLV) into CameraStatus."""
+    status_map = status_dict or {}
+
+    def s(key: int) -> Any:
+        # OpenGoPro HTTP status keys are strings; BLE status keys are ints.
+        if key in status_map:
+            return status_map[key]
+        return status_map.get(str(key))
+
+    battery_bars = _as_int(s(STATUS_BATTERY_BARS))
+    battery_percent = _as_int(s(STATUS_INTERNAL_BATTERY_PERCENT))
+    if battery_percent is None and battery_bars in (0, 1, 2, 3):
+        # Approximate fallback for cameras that do not expose percentage.
+        battery_percent = {0: 0, 1: 33, 2: 66, 3: 100}[battery_bars]
+
+    encoding_active = _as_int(s(STATUS_ENCODING)) == 1
+    storage_code = _as_int(s(STATUS_PRIMARY_STORAGE))
+    sd_status = SD_STORAGE_STATES.get(storage_code, "UNKNOWN") if storage_code is not None else "UNKNOWN"
+
+    sd_remaining_kb = _as_int(s(STATUS_SD_CARD_REMAINING_KB))
+    sd_remaining_mb = (
+        sd_remaining_kb // 1024 if sd_remaining_kb is not None and sd_remaining_kb >= 0 else None
+    )
+
+    preset_group = _as_int(s(STATUS_PRESET_GROUP))
+    current_mode = (
+        PRESET_GROUP_NAMES.get(preset_group, f"Unknown ({preset_group})")
+        if preset_group is not None
+        else "Unknown"
+    )
+    current_preset = _as_str(s(STATUS_PRESET))
+
+    return CameraStatus(
+        connected=True,
+        battery_percent=battery_percent,
+        battery_bars=battery_bars,
+        is_charging=battery_bars == 4,
+        is_recording=encoding_active,
+        encoding_active=encoding_active,
+        system_hot=_as_int(s(STATUS_SYSTEM_HOT)) == 1,
+        sd_status=sd_status,
+        sd_remaining_mb=sd_remaining_mb,
+        sd_remaining_video_time_sec=_as_int(s(STATUS_REMAINING_VIDEO_TIME)),
+        sd_remaining_photos=_as_int(s(STATUS_REMAINING_PHOTOS)),
+        current_mode=current_mode,
+        current_preset=current_preset,
+        raw_status={str(k): v for k, v in status_map.items()},
+    )
+
+
 class GoProRestClient:
     """HTTP REST API client for GoPro cameras (OpenGoPro v1/v2 over USB or Wi-Fi)."""
 
@@ -88,7 +181,7 @@ class GoProRestClient:
                 resp = client.get(url, params=params)
                 if resp.status_code != 200:
                     raise CommandError(f"HTTP {resp.status_code} for {url}: {resp.text}")
-                content_type = resp.headers.get("content-type", "")
+                content_type = resp.headers.get("content-type", "").strip().lower()
                 if not content_type.startswith("application/json"):
                     return {}
                 try:
@@ -106,63 +199,42 @@ class GoProRestClient:
         return self._get("/gopro/camera/state")
 
     def get_camera_info(self) -> Dict[str, Any]:
-        """Fetches model name, firmware, and serial number (HERO12+).
+        """Fetches model name, firmware, and serial number.
 
-        Older cameras may return 404/403 for this endpoint; callers should
-        treat failures as non-fatal.
+        Tries ``/gopro/camera/info`` (HERO12+) first and falls back to
+        ``/gp/gpControl/info`` on older cameras (HERO9-11).
         """
-        return self._get("/gopro/camera/info")
+        try:
+            return self._get("/gopro/camera/info")
+        except CommandError as primary_exc:
+            try:
+                payload = self._get("/gp/gpControl/info")
+            except CommandError:
+                raise primary_exc
+
+        info_block = payload.get("info") if isinstance(payload, dict) else None
+        raw_info = (
+            info_block
+            if isinstance(info_block, dict)
+            else (payload if isinstance(payload, dict) else {})
+        )
+        normalized = dict(raw_info)
+        fallbacks = (
+            ("model_name", "model"),
+            ("firmware_version", "firmware"),
+            ("serial_number", "serial"),
+            ("model_number", "model_id"),
+        )
+        for canonical, alt in fallbacks:
+            if normalized.get(canonical) is None and raw_info.get(alt) is not None:
+                normalized[canonical] = raw_info[alt]
+        return normalized
 
     def get_status(self) -> CameraStatus:
         """Parses camera state into a typed CameraStatus model."""
         raw = self.get_raw_state() or {}
         status_dict = raw.get("status", {}) or {}
-
-        def s(key: int) -> Any:
-            # OpenGoPro status keys are strings, but tolerate integer keys too.
-            if key in status_dict:
-                return status_dict[key]
-            return status_dict.get(str(key))
-
-        battery_bars = _as_int(s(STATUS_BATTERY_BARS))
-        battery_percent = _as_int(s(STATUS_INTERNAL_BATTERY_PERCENT))
-        if battery_percent is None and battery_bars in (0, 1, 2, 3):
-            # Approximate fallback for cameras that do not expose percentage.
-            battery_percent = {0: 0, 1: 33, 2: 66, 3: 100}[battery_bars]
-
-        encoding_active = _as_int(s(STATUS_ENCODING)) == 1
-        storage_code = _as_int(s(STATUS_PRIMARY_STORAGE))
-        sd_status = SD_STORAGE_STATES.get(storage_code, "UNKNOWN") if storage_code is not None else "UNKNOWN"
-
-        sd_remaining_kb = _as_int(s(STATUS_SD_CARD_REMAINING_KB))
-        sd_remaining_mb = (
-            sd_remaining_kb // 1024 if sd_remaining_kb is not None and sd_remaining_kb >= 0 else None
-        )
-
-        preset_group = _as_int(s(STATUS_PRESET_GROUP))
-        current_mode = (
-            PRESET_GROUP_NAMES.get(preset_group, f"Unknown ({preset_group})")
-            if preset_group is not None
-            else "Unknown"
-        )
-        current_preset = _as_str(s(STATUS_PRESET))
-
-        return CameraStatus(
-            connected=True,
-            battery_percent=battery_percent,
-            battery_bars=battery_bars,
-            is_charging=battery_bars == 4,
-            is_recording=encoding_active,
-            encoding_active=encoding_active,
-            system_hot=_as_int(s(STATUS_SYSTEM_HOT)) == 1,
-            sd_status=sd_status,
-            sd_remaining_mb=sd_remaining_mb,
-            sd_remaining_video_time_sec=_as_int(s(STATUS_REMAINING_VIDEO_TIME)),
-            sd_remaining_photos=_as_int(s(STATUS_REMAINING_PHOTOS)),
-            current_mode=current_mode,
-            current_preset=current_preset,
-            raw_status=status_dict,
-        )
+        return parse_camera_status(status_dict)
 
     # ------------------------------------------------------------------
     # Control

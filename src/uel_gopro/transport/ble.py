@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Optional
 
 from bleak import BleakClient, BleakScanner
 
-from uel_gopro.core.exceptions import TransportError
+from uel_gopro.api.rest import parse_camera_status
+from uel_gopro.core.exceptions import CommandError, TransportError, UelError
+from uel_gopro.core.models import CameraStatus
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,12 @@ BLE_MAX_PACKET_LEN = 20
 CMD_SHUTTER_START = bytes([0x01, 0x01, 0x01])  # SET_SHUTTER, 1 arg, start
 CMD_SHUTTER_STOP = bytes([0x01, 0x01, 0x00])  # SET_SHUTTER, 1 arg, stop
 CMD_POWER_ON_WIFI = bytes([0x17, 0x01, 0x01])  # SET_WIFI, 1 arg, enable AP
+
+# OpenGoPro BLE query opcodes (sent via QUERY_REQ / QUERY_RSP).
+QUERY_GET_SETTING_VALUES = 0x12
+QUERY_GET_STATUS_VALUES = 0x13
+QUERY_GET_AVAILABLE_SETTINGS = 0x32
+DEFAULT_STATUS_QUERY_IDS = [2, 6, 8, 10, 33, 34, 35, 54, 70, 96, 97]
 
 
 def frame_ble_packet(payload: bytes, max_packet_len: int = BLE_MAX_PACKET_LEN) -> list[bytes]:
@@ -81,6 +90,10 @@ def frame_ble_packet(payload: bytes, max_packet_len: int = BLE_MAX_PACKET_LEN) -
     return packets
 
 
+class _IncompleteBleFrameError(ValueError):
+    """Internal signal that more BLE notification packets are needed."""
+
+
 def deframe_ble_packets(packets: list[bytes]) -> bytes:
     """Reassemble a GoPro BLE payload from one or more received packets.
 
@@ -120,10 +133,38 @@ def deframe_ble_packets(packets: list[bytes]) -> bytes:
         payload.extend(packet[1:])
 
     if len(payload) < expected_len:
-        raise ValueError(
+        raise _IncompleteBleFrameError(
             f"Incomplete packet frame: expected {expected_len} bytes, got {len(payload)}"
         )
     return bytes(payload[:expected_len])
+
+
+def parse_ble_tlv_response(raw: bytes) -> tuple[int, int, dict[int, list[int]]]:
+    """Parse an OpenGoPro BLE query TLV response ``[query_id, status_code, id, len, val...]``."""
+    if len(raw) < 2:
+        raise ValueError(f"BLE TLV response too short: expected at least 2 bytes, got {len(raw)}")
+
+    query_id = raw[0]
+    status_code = raw[1]
+    values: dict[int, list[int]] = {}
+    i = 2
+    while i < len(raw):
+        if i + 2 > len(raw):
+            raise ValueError(f"Truncated BLE TLV entry header at offset {i}")
+        entry_id = raw[i]
+        length = raw[i + 1]
+        if i + 2 + length > len(raw):
+            raise ValueError(
+                f"Truncated BLE TLV entry for ID {entry_id}: expected {length} bytes, "
+                f"got {len(raw) - (i + 2)}"
+            )
+        bucket = values.setdefault(entry_id, [])
+        if length > 0:
+            val_bytes = raw[i + 2 : i + 2 + length]
+            bucket.append(int.from_bytes(val_bytes, "big"))
+        i += 2 + length
+
+    return query_id, status_code, values
 
 
 class GoProBleClient:
@@ -137,6 +178,7 @@ class GoProBleClient:
         self.address = address
         self._client = client
         self._is_connected = False
+        self._response_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
     async def scan(cls, timeout: float = 3.0) -> list[Any]:
@@ -169,8 +211,10 @@ class GoProBleClient:
     async def disconnect(self) -> None:
         """Disconnect from the BLE device."""
         if self._client is not None:
-            await self._client.disconnect()
-            self._is_connected = False
+            try:
+                await self._client.disconnect()
+            finally:
+                self._is_connected = False
 
     @property
     def is_connected(self) -> bool:
@@ -239,6 +283,189 @@ class GoProBleClient:
         if not self.is_connected or self._client is None:
             return
         await self._client.stop_notify(COMMAND_RSP)
+
+    async def _await_ble_response(
+        self,
+        req_uuid: str,
+        rsp_uuid: str,
+        payload: bytes,
+        timeout_sec: float = 5.0,
+    ) -> bytes:
+        """Send a framed BLE payload on ``req_uuid`` and reassemble the response from ``rsp_uuid``."""
+        if not self.is_connected or self._client is None:
+            raise TransportError("BLE client is not connected")
+
+        lock = self._response_locks.setdefault(rsp_uuid, asyncio.Lock())
+        async with lock:
+            if not self.is_connected or self._client is None:
+                raise TransportError("BLE client is not connected")
+
+            packets_to_send = frame_ble_packet(payload)
+            rx_packets: list[bytes] = []
+            assembled: Optional[bytes] = None
+            assemble_error: Optional[Exception] = None
+            done = asyncio.Event()
+
+            def _on_notify(_sender: Any, data: bytearray) -> None:
+                nonlocal assembled, assemble_error
+                if done.is_set() or not data:
+                    return
+                pkt = bytes(data)
+                if (pkt[0] & 0x80) == 0:
+                    rx_packets.clear()
+                elif not rx_packets:
+                    return
+                rx_packets.append(pkt)
+                try:
+                    assembled = deframe_ble_packets(rx_packets)
+                except _IncompleteBleFrameError:
+                    return
+                except ValueError as exc:
+                    assemble_error = exc
+                    done.set()
+                else:
+                    done.set()
+
+            try:
+                await self._client.start_notify(rsp_uuid, _on_notify)
+            except UelError:
+                raise
+            except Exception as exc:
+                raise TransportError(f"Failed to subscribe to BLE notifications on {rsp_uuid}: {exc}") from exc
+
+            try:
+                for packet in packets_to_send:
+                    try:
+                        await self._client.write_gatt_char(req_uuid, packet, response=True)
+                    except UelError:
+                        raise
+                    except Exception as exc:
+                        raise TransportError(f"BLE write to {req_uuid} failed: {exc}") from exc
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=timeout_sec)
+                except asyncio.TimeoutError as exc:
+                    raise TransportError(
+                        f"Timed out waiting for BLE response on {rsp_uuid} after {timeout_sec:.1f}s"
+                    ) from exc
+            finally:
+                try:
+                    await self._client.stop_notify(rsp_uuid)
+                except Exception:
+                    pass
+
+            if assemble_error is not None:
+                raise TransportError(f"Invalid BLE response frame: {assemble_error}") from assemble_error
+            assert assembled is not None
+            return assembled
+
+    async def query(self, payload: bytes, timeout_sec: float = 5.0) -> bytes:
+        """Send an OpenGoPro query payload on QUERY_REQ and return deframed QUERY_RSP bytes."""
+        return await self._await_ble_response(
+            QUERY_REQ,
+            QUERY_RSP,
+            payload,
+            timeout_sec=timeout_sec,
+        )
+
+    async def _query_tlv(
+        self,
+        query_op: int,
+        ids: Optional[list[int]] = None,
+        timeout_sec: float = 5.0,
+    ) -> dict[int, list[int]]:
+        """Execute a TLV query opcode and verify the response opcode and status code."""
+        raw = await self.query(bytes([query_op, *(ids or [])]), timeout_sec=timeout_sec)
+        query_id, status_code, parsed = parse_ble_tlv_response(raw)
+        if query_id != query_op:
+            raise CommandError(
+                f"BLE query response mismatch: expected opcode 0x{query_op:02x}, got 0x{query_id:02x}"
+            )
+        if status_code != 0:
+            raise CommandError(
+                f"BLE query 0x{query_op:02x} failed with status code {status_code}"
+            )
+        return parsed
+
+    async def get_status_values(
+        self,
+        status_ids: Optional[list[int]] = None,
+        timeout_sec: float = 5.0,
+    ) -> dict[int, int]:
+        """Query camera status values over BLE (opcode 0x13)."""
+        parsed = await self._query_tlv(
+            QUERY_GET_STATUS_VALUES,
+            status_ids,
+            timeout_sec=timeout_sec,
+        )
+        return {k: vals[-1] for k, vals in parsed.items() if vals}
+
+    async def get_camera_status(self, timeout_sec: float = 5.0) -> CameraStatus:
+        """Query core camera status IDs over BLE and parse into CameraStatus."""
+        values = await self.get_status_values(DEFAULT_STATUS_QUERY_IDS, timeout_sec=timeout_sec)
+        return parse_camera_status(values)
+
+    async def get_settings(
+        self,
+        setting_ids: Optional[list[int]] = None,
+        timeout_sec: float = 5.0,
+    ) -> dict[int, int]:
+        """Query camera setting values over BLE (opcode 0x12)."""
+        parsed = await self._query_tlv(
+            QUERY_GET_SETTING_VALUES,
+            setting_ids,
+            timeout_sec=timeout_sec,
+        )
+        return {k: vals[-1] for k, vals in parsed.items() if vals}
+
+    async def get_available_settings(
+        self,
+        setting_ids: Optional[list[int]] = None,
+        timeout_sec: float = 5.0,
+    ) -> dict[int, list[int]]:
+        """Query available setting capabilities over BLE (opcode 0x32)."""
+        return await self._query_tlv(
+            QUERY_GET_AVAILABLE_SETTINGS,
+            setting_ids,
+            timeout_sec=timeout_sec,
+        )
+
+    async def set_setting(
+        self,
+        setting_id: int,
+        value: int,
+        timeout_sec: float = 5.0,
+    ) -> None:
+        """Mutate a 1-byte camera setting over BLE SETTINGS_REQ/SETTINGS_RSP."""
+        if isinstance(setting_id, bool) or not isinstance(setting_id, int):
+            raise CommandError(f"BLE setting ID must be an int, got {setting_id!r}")
+        if not (0 <= setting_id <= 255):
+            raise CommandError(
+                f"BLE setting ID {setting_id!r} is out of 1-byte range (0-255)"
+            )
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise CommandError(f"BLE setting value must be an int, got {value!r}")
+        if not (0 <= value <= 255):
+            raise CommandError(
+                f"BLE setting value {value!r} is out of 1-byte range (0-255)"
+            )
+        resp = await self._await_ble_response(
+            SETTINGS_REQ,
+            SETTINGS_RSP,
+            bytes([setting_id, 1, value]),
+            timeout_sec=timeout_sec,
+        )
+        if len(resp) < 2:
+            raise CommandError(
+                f"Invalid BLE settings response: expected at least 2 bytes, got {len(resp)}"
+            )
+        if resp[0] != setting_id:
+            raise CommandError(
+                f"BLE settings response mismatch: expected setting ID {setting_id}, got {resp[0]}"
+            )
+        if resp[1] != 0:
+            raise CommandError(
+                f"BLE set_setting({setting_id}={value}) failed with status code {resp[1]}"
+            )
 
     async def __aenter__(self) -> GoProBleClient:
         await self.connect()

@@ -1,7 +1,12 @@
 import pytest
 
-from uel_gopro.api.rest import GoProRestClient
-from uel_gopro.core.exceptions import CameraNotFoundError
+from uel_gopro.api.rest import (
+    SETTING_ALIASES,
+    GoProRestClient,
+    parse_camera_status,
+    resolve_setting_id,
+)
+from uel_gopro.core.exceptions import CameraNotFoundError, CommandError
 from uel_gopro.core.models import MediaType, TransportType
 from uel_gopro.transport.manager import resolve_camera
 from uel_gopro.transport.usb import detect_usb_camera, probe_camera_ip
@@ -149,6 +154,144 @@ def test_rest_client_camera_info(monkeypatch):
     )
     info = client.get_camera_info()
     assert info["model_name"] == "HERO12 Black"
+
+
+def test_rest_client_camera_info_gpcontrol_fallback(monkeypatch):
+    client = GoProRestClient("172.21.108.51")
+    calls = []
+
+    def fake_get(endpoint, params=None):
+        calls.append(endpoint)
+        if endpoint == "/gopro/camera/info":
+            raise CommandError("HTTP 404 for /gopro/camera/info")
+        if endpoint == "/gp/gpControl/info":
+            return {
+                "info": {
+                    "model_number": 57,
+                    "model_name": "HERO10 Black",
+                    "firmware_version": "H21.01.01.62.00",
+                    "serial_number": "C3461326122108",
+                    "ap_ssid": "GP26122108",
+                }
+            }
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    info = client.get_camera_info()
+    assert calls == ["/gopro/camera/info", "/gp/gpControl/info"]
+    assert info["model_number"] == 57
+    assert info["model_name"] == "HERO10 Black"
+    assert info["firmware_version"] == "H21.01.01.62.00"
+    assert info["serial_number"] == "C3461326122108"
+    assert info["ap_ssid"] == "GP26122108"
+
+
+def test_rest_client_camera_info_reraises_original_error_when_fallback_fails(monkeypatch):
+    client = GoProRestClient("172.21.108.51")
+
+    def fake_get(endpoint, params=None):
+        if endpoint == "/gopro/camera/info":
+            raise CommandError("HTTP 404 original")
+        raise CommandError("HTTP 500 fallback")
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    with pytest.raises(CommandError, match="HTTP 404 original"):
+        client.get_camera_info()
+
+
+def test_rest_client_camera_info_non_dict_and_none_field_fallbacks(monkeypatch):
+    client = GoProRestClient("172.21.108.51")
+
+    def fake_non_dict(endpoint, params=None):
+        if endpoint == "/gopro/camera/info":
+            raise CommandError("HTTP 404")
+        return ["unexpected-list"]
+
+    monkeypatch.setattr(client, "_get", fake_non_dict)
+    assert client.get_camera_info() == {}
+
+    def fake_none_fields(endpoint, params=None):
+        if endpoint == "/gopro/camera/info":
+            raise CommandError("HTTP 404")
+        return {
+            "info": {
+                "model_name": None,
+                "model": "HERO10 Black",
+                "firmware_version": None,
+                "firmware": "H21.01.01.62.00",
+                "serial_number": None,
+                "serial": "C3461326122108",
+                "model_number": None,
+                "model_id": 57,
+            }
+        }
+
+    monkeypatch.setattr(client, "_get", fake_none_fields)
+    info = client.get_camera_info()
+    assert info["model_name"] == "HERO10 Black"
+    assert info["firmware_version"] == "H21.01.01.62.00"
+    assert info["serial_number"] == "C3461326122108"
+    assert info["model_number"] == 57
+
+
+def test_rest_client_get_case_insensitive_content_type(monkeypatch):
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "Application/JSON; charset=utf-8"}
+
+        def json(self):
+            return {"ok": True}
+
+    class MockHttpxClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, params=None):
+            return MockResponse()
+
+    monkeypatch.setattr("httpx.Client", MockHttpxClient)
+    client = GoProRestClient("172.20.150.51")
+    assert client._get("/gopro/camera/state") == {"ok": True}
+
+
+def test_parse_camera_status_int_and_str_keys_and_new_aliases():
+    assert SETTING_ALIASES["anti_flicker"] == 134
+    assert SETTING_ALIASES["hypersmooth"] == 135
+    assert resolve_setting_id("anti_flicker") == 134
+    assert resolve_setting_id("hypersmooth") == 135
+
+    status_from_ints = parse_camera_status(
+        {
+            2: 3,
+            6: 1,
+            10: 1,
+            33: 0,
+            34: 500,
+            35: 1200,
+            54: 10240,
+            70: 88,
+            96: 1000,
+            97: 4,
+        }
+    )
+    assert status_from_ints.battery_percent == 88
+    assert status_from_ints.system_hot is True
+    assert status_from_ints.is_recording is True
+    assert status_from_ints.sd_remaining_mb == 10
+    assert status_from_ints.current_mode == "Video"
+    assert status_from_ints.current_preset == "4"
+    assert status_from_ints.raw_status["70"] == 88
+
+    status_from_strs = parse_camera_status({"70": "42", "33": "0", "96": "1001"})
+    assert status_from_strs.battery_percent == 42
+    assert status_from_strs.current_mode == "Photo"
+    assert status_from_strs.raw_status["96"] == "1001"
 
 
 def test_rest_client_media_list(monkeypatch):
