@@ -1,26 +1,27 @@
 # UEL-GoPro roadmap
 
-This file plans work after the 0.1.1 source tree. 0.1.1 was tagged and published to GitHub and PyPI on 2026-10-28 on software checks only. The hardware matrix remains open. A hardware failure should ship as a 0.1.2 patch before 0.2.0.
+This file plans work after the 0.1.2 release. 0.1.1 was tagged and published on 2026-10-28 on software checks only; 0.1.2 adds the live camera feed, model- and setting-aware capabilities, BLE TLV queries/config, and the first HERO10 Black hardware checks.
 
 Dates are relative weeks and assume one maintainer with access to HERO9 through HERO13, one macOS host, and one Linux host. Ordering is by risk.
 
 ## Current baseline
 
-- The suite has 107 offline tests for protocol construction, parsers, mocked HTTP, and synthetic media. CI runs them on Linux only.
-- Transports are USB CDC-ECM, Wi-Fi AP, and manual IP. MTP is macOS-only and media-only. The BLE client can send shutter and Wi-Fi AP commands, the CLI exposes shutter only, and there's no response parsing.
+- The suite has 278 offline tests for protocol construction, parsers, mocked HTTP, synthetic media, live transcoder, Web Component UI, and localhost server integration. CI runs them on Linux only.
+- Transports are USB CDC-ECM, Wi-Fi AP, and manual IP. MTP is macOS-only and media-only. BLE now supports scanning with retries, status (`0x13`), settings (`0x12`), live capabilities (`0x32`), and `set_setting()` acks; shutter (`COMMAND_RSP`) still has no ack parsing.
+- Live preview (`stream live`) serves a self-contained viewfinder UI, `/embed`, `<uel-gopro-live>` Web Component, `/stream.mjpeg`, and `/api/*`, saving recorded clips, photos, live frame snapshots, and pulled media to `~/Downloads`.
 - Telemetry covers GPS5 and GPS9 points with SCAL and GPSU. GPSP is ignored. IMU streams are detected but not decoded.
 - Media downloads are sequential and resumable, with byte-count checks. There are no checksums, free-space checks, or parallel transfers. Stitch uses FFmpeg stream copy.
 - Distribution has no stable Homebrew tap, no signed binaries, no `py.typed`, and no coverage or type-check gate. The local PyInstaller spec is gitignored.
 
-## 1. v0.1.1 publication and hardware gate
+## 1. v0.1.2 publication and hardware gate
 
-The software and publication gate is complete. The hardware matrix below was not run for 0.1.1 and now blocks 0.2.0. A hardware failure should ship as a 0.1.2 patch.
+Software validation and HERO10 Black USB/BLE live checks are recorded in [docs/validation/0.1.2.md](docs/validation/0.1.2.md). Remaining camera models and features in the matrix below remain open for 0.2.0.
 
 | Check | HERO9 | HERO10 | HERO11 | HERO12 | HERO13 |
 |---|---|---|---|---|---|
-| USB CDC-ECM: discover, status, record | run | run | run | run | run |
+| USB CDC-ECM: discover, status, record, live | run | pass (status, capabilities, stream live) | run | run | run |
 | Wi-Fi AP: discover, status, record | run | run | run | run | run |
-| BLE shutter and Wi-Fi AP enable | run | run | run | run | run |
+| BLE discover, status, settings, shutter | run | pass (discover, status, 0x12/0x13/0x32) | run | run | run |
 | Webcam 480p, 720p, 1080p | run | run | run | run | run |
 | MTP list and download (macOS host) | run | run | run | run | run |
 | Stitch two or more chapters | run | run | run | run | run |

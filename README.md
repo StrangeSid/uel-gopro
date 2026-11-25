@@ -16,7 +16,7 @@ It is **alpha software**. The OpenGoPro HTTP API is the primary interface. Some
 endpoints only exist on newer cameras, and Bluetooth and USB-MTP support are
 narrower than the wired and Wi-Fi path.
 
-Current version: **0.1.1**. Install it from PyPI or from source. See
+Current version: **0.1.2**. Install it from PyPI or from source. See
 [Installation](#installation).
 
 ---
@@ -79,7 +79,7 @@ uv tool install .
 uv run uel-gopro --help
 ```
 
-This installs the current source tree (0.1.1). Use PyPI unless you need
+This installs the current source tree (0.1.2). Use PyPI unless you need
 unreleased changes.
 
 ### One-line installer
@@ -335,9 +335,10 @@ notice. There's no OAuth flow.
 - MTP is macOS-only and limited to media listing and download.
 - No SD-card format command.
 - No parallel downloads. Downloads resume sequentially.
-- BLE is minimal. The CLI exposes shutter control. The client has a Wi-Fi AP
-  helper, but no command calls it. There's no response or ack parsing, pairing
-  UI, or multi-camera selection.
+- BLE covers discovery, status/settings/capabilities TLV queries (`0x12`/`0x13`/`0x32`),
+  `set_setting` ack validation, and shutter writes. Shutter (`COMMAND_RSP`)
+  ack parsing, CLI Wi-Fi AP enablement, pairing UI, and multi-camera selection
+  are not implemented yet.
 - IMU telemetry isn't exported. Only GPS points are parsed into tracks.
 - GPS timestamps are approximate because `GPSP` isn't parsed.
 - Cloud support is unofficial and token-based.
