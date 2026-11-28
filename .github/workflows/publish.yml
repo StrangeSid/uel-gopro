@@ -47,7 +47,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     environment:
-      name: publish-sid
+      name: pypi
       url: https://pypi.org/p/uel-gopro
     permissions:
       id-token: write
