@@ -3,10 +3,6 @@
 > **Unofficial Extended Life GoPro Toolchain**
 > A local-first, scriptable CLI for OpenGoPro-compatible cameras.
 
-[![PyPI](https://img.shields.io/pypi/v/uel-gopro)](https://pypi.org/project/uel-gopro/)
-[![GitHub Release](https://img.shields.io/github/v/release/StrangeSid/uel-gopro)](https://github.com/StrangeSid/uel-gopro/releases/latest)
-[![CI](https://github.com/StrangeSid/uel-gopro/actions/workflows/ci.yml/badge.svg)](https://github.com/StrangeSid/uel-gopro/actions/workflows/ci.yml)
-
 ---
 
 ## What this is
